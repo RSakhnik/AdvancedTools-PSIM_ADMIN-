@@ -1,0 +1,61 @@
+﻿<Window x:Class="AdvancedTools.Pages.MoverWindow"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:local="clr-namespace:AdvancedTools.Pages"
+             mc:Ignorable="d" 
+             Title="Перенос IFC модели" Height="400" Width="600">
+
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Исходная папка -->
+        <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="0,5">Выберите папку с исходной моделью:</TextBlock>
+        <TextBox Grid.Row="0" Grid.Column="1" Margin="5" Name="InputFolderTextBox"/>
+        <Button Grid.Row="0" Grid.Column="2" Margin="5" Width="75" Content="Обзор" Name="BrowseInputButton"/>
+
+        <!-- Выходная папка -->
+        <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="0,5">Выберите выходную папку:</TextBlock>
+        <TextBox Grid.Row="1" Grid.Column="1" Margin="5" Name="OutputFolderTextBox"/>
+        <Button Grid.Row="1" Grid.Column="2" Margin="5" Width="75" Content="Обзор" Name="BrowseOutputButton"/>
+
+        <!-- Поля X, Y, Z -->
+        <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,15">
+            <TextBlock VerticalAlignment="Center" Margin="5">X:</TextBlock>
+            <TextBox Width="100" Margin="5" Name="XCoordTextBox"/>
+            <TextBlock VerticalAlignment="Center" Margin="5">Y:</TextBlock>
+            <TextBox Width="100" Margin="5" Name="YCoordTextBox"/>
+            <TextBlock VerticalAlignment="Center" Margin="5">Z:</TextBlock>
+            <TextBox Width="100" Margin="5" Name="ZCoordTextBox"/>
+        </StackPanel>
+
+        <!-- Кнопка переноса -->
+        <Button Grid.Row="3" 
+                Grid.Column="0" 
+                Grid.ColumnSpan="3" 
+                Content="Перенести!" 
+                Width="120" Height="35" 
+                HorizontalAlignment="Center" 
+                VerticalAlignment="Top" 
+                Margin="0,10" 
+                Name="MoveButton"/>
+
+        <TextBox Name="LogTextBox"
+         Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3"
+         Margin="0,64,0,20"
+         VerticalScrollBarVisibility="Auto"
+         IsReadOnly="True"
+         TextWrapping="Wrap"/>
+    </Grid>
+</Window>
