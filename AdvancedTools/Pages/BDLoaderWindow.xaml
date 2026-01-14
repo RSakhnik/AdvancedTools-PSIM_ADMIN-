@@ -50,11 +50,19 @@
                     Content="Загрузить в БД"
                     Padding="16,6"
                     Click="StartButton_Click"/>
+
+            <Button x:Name="TestConnectionButton"
+                    Content="Проверить подключение"
+                    Padding="12,6"
+                    Margin="8,0,0,0"
+                    Click="TestConnectionButton_Click"/>
+
             <Button x:Name="ClearLogButton"
                     Content="Очистить лог"
                     Padding="12,6"
                     Margin="8,0,0,0"
                     Click="ClearLogButton_Click"/>
+
             <TextBlock x:Name="StatusText"
                        Margin="12,6,0,0"
                        VerticalAlignment="Center"
