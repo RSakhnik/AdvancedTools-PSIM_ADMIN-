@@ -2,15 +2,16 @@
 <xs:schema id="dbIntexa" targetNamespace="http://tempuri.org/dbIntexa.xsd" xmlns:mstns="http://tempuri.org/dbIntexa.xsd" xmlns="http://tempuri.org/dbIntexa.xsd" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata" xmlns:msprop="urn:schemas-microsoft-com:xml-msprop" attributeFormDefault="qualified" elementFormDefault="qualified">
   <xs:annotation>
     <xs:appinfo source="urn:schemas-microsoft-com:xml-msdatasource">
-      <DataSource DefaultConnectionIndex="1" FunctionsComponentName="QueriesTableAdapter" Modifier="AutoLayout, AnsiClass, Class, Public" SchemaSerializationMode="IncludeSchema" xmlns="urn:schemas-microsoft-com:xml-msdatasource">
+      <DataSource DefaultConnectionIndex="2" FunctionsComponentName="QueriesTableAdapter" Modifier="AutoLayout, AnsiClass, Class, Public" SchemaSerializationMode="IncludeSchema" xmlns="urn:schemas-microsoft-com:xml-msdatasource">
         <Connections>
           <Connection AppSettingsObjectName="Settings" AppSettingsPropertyName="ConnectionString" ConnectionStringObject="" IsAppSettingsProperty="true" Modifier="Assembly" Name="ConnectionString (Settings)" ParameterPrefix="@" PropertyReference="ApplicationSettings.AdvancedTools.Properties.Settings.GlobalReference.Default.ConnectionString" Provider="System.Data.SqlClient" />
           <Connection AppSettingsObjectName="Settings" AppSettingsPropertyName="dbCommonConnectionString" ConnectionStringObject="" IsAppSettingsProperty="true" Modifier="Assembly" Name="dbCommonConnectionString (Settings)" ParameterPrefix="@" PropertyReference="ApplicationSettings.AdvancedTools.Properties.Settings.GlobalReference.Default.dbCommonConnectionString" Provider="System.Data.SqlClient" />
+          <Connection AppSettingsObjectName="Settings" AppSettingsPropertyName="dbCommonConnectionString1" ConnectionStringObject="" IsAppSettingsProperty="true" Modifier="Assembly" Name="dbCommonConnectionString1 (Settings)" ParameterPrefix="@" PropertyReference="ApplicationSettings.AdvancedTools.Properties.Settings.GlobalReference.Default.dbCommonConnectionString1" Provider="System.Data.SqlClient" />
         </Connections>
         <Tables>
           <TableAdapter BaseClass="System.ComponentModel.Component" DataAccessorModifier="AutoLayout, AnsiClass, Class, Public" DataAccessorName="IntexaTableAdapter" GeneratorDataComponentClassName="IntexaTableAdapter" Name="Intexa" UserDataComponentName="IntexaTableAdapter">
             <MainSource>
-              <DbSource ConnectionRef="dbCommonConnectionString (Settings)" DbObjectName="dbCommon.dbo.Intexa" DbObjectType="Table" FillMethodModifier="Public" FillMethodName="Fill" GenerateMethods="Both" GenerateShortCommands="false" GeneratorGetMethodName="GetData" GeneratorSourceName="Fill" GetMethodModifier="Public" GetMethodName="GetData" QueryType="Rowset" ScalarCallRetval="System.Object, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" UseOptimisticConcurrency="false" UserGetMethodName="GetData" UserSourceName="Fill">
+              <DbSource ConnectionRef="dbCommonConnectionString1 (Settings)" DbObjectName="dbCommon.dbo.Intexa" DbObjectType="Table" FillMethodModifier="Public" FillMethodName="Fill" GenerateMethods="Both" GenerateShortCommands="false" GeneratorGetMethodName="GetData" GeneratorSourceName="Fill" GetMethodModifier="Public" GetMethodName="GetData" QueryType="Rowset" ScalarCallRetval="System.Object, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" UseOptimisticConcurrency="false" UserGetMethodName="GetData" UserSourceName="Fill">
                 <InsertCommand>
                   <DbCommand CommandType="Text" ModifiedByUser="false">
                     <CommandText>INSERT INTO [Intexa] ([Project], [Place], [Id], [Category], [Type], [Status], [StartDate], [EndDate], [X1], [Y1], [Z1], [X2], [Y2], [Z2], [X3], [Y3], [Z3], [X4], [Y4], [Z4], [X5], [Y5], [Z5], [X6], [Y6], [Z6], [X7], [Y7], [Z7], [X8], [Y8], [Z8], [RespWorkManager], [Giving], [RespContractor], [Concordant]) VALUES (@Project, @Place, @Id, @Category, @Type, @Status, @StartDate, @EndDate, @X1, @Y1, @Z1, @X2, @Y2, @Z2, @X3, @Y3, @Z3, @X4, @Y4, @Z4, @X5, @Y5, @Z5, @X6, @Y6, @Z6, @X7, @Y7, @Z7, @X8, @Y8, @Z8, @RespWorkManager, @Giving, @RespContractor, @Concordant)</CommandText>
@@ -168,36 +169,36 @@ FROM            Intexa</CommandText>
               <xs:element name="Y7" msprop:Generator_ColumnPropNameInTable="Y7Column" msprop:Generator_ColumnPropNameInRow="Y7" msprop:Generator_UserColumnName="Y7" msprop:Generator_ColumnVarNameInTable="columnY7" type="xs:double" minOccurs="0" />
               <xs:element name="X8" msprop:Generator_ColumnPropNameInTable="X8Column" msprop:Generator_ColumnPropNameInRow="X8" msprop:Generator_UserColumnName="X8" msprop:Generator_ColumnVarNameInTable="columnX8" type="xs:double" minOccurs="0" />
               <xs:element name="Y8" msprop:Generator_ColumnPropNameInTable="Y8Column" msprop:Generator_ColumnPropNameInRow="Y8" msprop:Generator_UserColumnName="Y8" msprop:Generator_ColumnVarNameInTable="columnY8" type="xs:double" minOccurs="0" />
-              <xs:element name="Z1" msprop:Generator_UserColumnName="Z1" msprop:Generator_ColumnPropNameInTable="Z1Column" msprop:Generator_ColumnPropNameInRow="Z1" msprop:Generator_ColumnVarNameInTable="columnZ1" type="xs:double" minOccurs="0" />
-              <xs:element name="Z2" msprop:Generator_UserColumnName="Z2" msprop:Generator_ColumnPropNameInTable="Z2Column" msprop:Generator_ColumnPropNameInRow="Z2" msprop:Generator_ColumnVarNameInTable="columnZ2" type="xs:double" minOccurs="0" />
-              <xs:element name="Z3" msprop:Generator_UserColumnName="Z3" msprop:Generator_ColumnPropNameInTable="Z3Column" msprop:Generator_ColumnPropNameInRow="Z3" msprop:Generator_ColumnVarNameInTable="columnZ3" type="xs:double" minOccurs="0" />
-              <xs:element name="Z4" msprop:Generator_UserColumnName="Z4" msprop:Generator_ColumnPropNameInTable="Z4Column" msprop:Generator_ColumnPropNameInRow="Z4" msprop:Generator_ColumnVarNameInTable="columnZ4" type="xs:double" minOccurs="0" />
-              <xs:element name="Z5" msprop:Generator_UserColumnName="Z5" msprop:Generator_ColumnPropNameInTable="Z5Column" msprop:Generator_ColumnPropNameInRow="Z5" msprop:Generator_ColumnVarNameInTable="columnZ5" type="xs:double" minOccurs="0" />
-              <xs:element name="Z6" msprop:Generator_UserColumnName="Z6" msprop:Generator_ColumnPropNameInTable="Z6Column" msprop:Generator_ColumnPropNameInRow="Z6" msprop:Generator_ColumnVarNameInTable="columnZ6" type="xs:double" minOccurs="0" />
-              <xs:element name="Z7" msprop:Generator_UserColumnName="Z7" msprop:Generator_ColumnPropNameInTable="Z7Column" msprop:Generator_ColumnPropNameInRow="Z7" msprop:Generator_ColumnVarNameInTable="columnZ7" type="xs:double" minOccurs="0" />
-              <xs:element name="Z8" msprop:Generator_UserColumnName="Z8" msprop:Generator_ColumnPropNameInTable="Z8Column" msprop:Generator_ColumnPropNameInRow="Z8" msprop:Generator_ColumnVarNameInTable="columnZ8" type="xs:double" minOccurs="0" />
-              <xs:element name="RespWorkManager" msprop:Generator_ColumnPropNameInRow="RespWorkManager" msprop:Generator_ColumnPropNameInTable="RespWorkManagerColumn" msprop:Generator_ColumnVarNameInTable="columnRespWorkManager" msprop:Generator_UserColumnName="RespWorkManager" minOccurs="0">
+              <xs:element name="Z1" msprop:Generator_ColumnPropNameInTable="Z1Column" msprop:Generator_ColumnPropNameInRow="Z1" msprop:Generator_UserColumnName="Z1" msprop:Generator_ColumnVarNameInTable="columnZ1" type="xs:double" minOccurs="0" />
+              <xs:element name="Z2" msprop:Generator_ColumnPropNameInTable="Z2Column" msprop:Generator_ColumnPropNameInRow="Z2" msprop:Generator_UserColumnName="Z2" msprop:Generator_ColumnVarNameInTable="columnZ2" type="xs:double" minOccurs="0" />
+              <xs:element name="Z3" msprop:Generator_ColumnPropNameInTable="Z3Column" msprop:Generator_ColumnPropNameInRow="Z3" msprop:Generator_UserColumnName="Z3" msprop:Generator_ColumnVarNameInTable="columnZ3" type="xs:double" minOccurs="0" />
+              <xs:element name="Z4" msprop:Generator_ColumnPropNameInTable="Z4Column" msprop:Generator_ColumnPropNameInRow="Z4" msprop:Generator_UserColumnName="Z4" msprop:Generator_ColumnVarNameInTable="columnZ4" type="xs:double" minOccurs="0" />
+              <xs:element name="Z5" msprop:Generator_ColumnPropNameInTable="Z5Column" msprop:Generator_ColumnPropNameInRow="Z5" msprop:Generator_UserColumnName="Z5" msprop:Generator_ColumnVarNameInTable="columnZ5" type="xs:double" minOccurs="0" />
+              <xs:element name="Z6" msprop:Generator_ColumnPropNameInTable="Z6Column" msprop:Generator_ColumnPropNameInRow="Z6" msprop:Generator_UserColumnName="Z6" msprop:Generator_ColumnVarNameInTable="columnZ6" type="xs:double" minOccurs="0" />
+              <xs:element name="Z7" msprop:Generator_ColumnPropNameInTable="Z7Column" msprop:Generator_ColumnPropNameInRow="Z7" msprop:Generator_UserColumnName="Z7" msprop:Generator_ColumnVarNameInTable="columnZ7" type="xs:double" minOccurs="0" />
+              <xs:element name="Z8" msprop:Generator_ColumnPropNameInTable="Z8Column" msprop:Generator_ColumnPropNameInRow="Z8" msprop:Generator_UserColumnName="Z8" msprop:Generator_ColumnVarNameInTable="columnZ8" type="xs:double" minOccurs="0" />
+              <xs:element name="RespWorkManager" msprop:Generator_UserColumnName="RespWorkManager" msprop:Generator_ColumnPropNameInTable="RespWorkManagerColumn" msprop:Generator_ColumnPropNameInRow="RespWorkManager" msprop:Generator_ColumnVarNameInTable="columnRespWorkManager" minOccurs="0">
                 <xs:simpleType>
                   <xs:restriction base="xs:string">
                     <xs:maxLength value="50" />
                   </xs:restriction>
                 </xs:simpleType>
               </xs:element>
-              <xs:element name="Giving" msprop:Generator_ColumnPropNameInRow="Giving" msprop:Generator_ColumnPropNameInTable="GivingColumn" msprop:Generator_ColumnVarNameInTable="columnGiving" msprop:Generator_UserColumnName="Giving" minOccurs="0">
+              <xs:element name="Giving" msprop:Generator_UserColumnName="Giving" msprop:Generator_ColumnPropNameInTable="GivingColumn" msprop:Generator_ColumnPropNameInRow="Giving" msprop:Generator_ColumnVarNameInTable="columnGiving" minOccurs="0">
                 <xs:simpleType>
                   <xs:restriction base="xs:string">
                     <xs:maxLength value="50" />
                   </xs:restriction>
                 </xs:simpleType>
               </xs:element>
-              <xs:element name="RespContractor" msprop:Generator_ColumnPropNameInRow="RespContractor" msprop:Generator_ColumnPropNameInTable="RespContractorColumn" msprop:Generator_ColumnVarNameInTable="columnRespContractor" msprop:Generator_UserColumnName="RespContractor" minOccurs="0">
+              <xs:element name="RespContractor" msprop:Generator_UserColumnName="RespContractor" msprop:Generator_ColumnPropNameInTable="RespContractorColumn" msprop:Generator_ColumnPropNameInRow="RespContractor" msprop:Generator_ColumnVarNameInTable="columnRespContractor" minOccurs="0">
                 <xs:simpleType>
                   <xs:restriction base="xs:string">
                     <xs:maxLength value="50" />
                   </xs:restriction>
                 </xs:simpleType>
               </xs:element>
-              <xs:element name="Concordant" msprop:Generator_ColumnPropNameInRow="Concordant" msprop:Generator_ColumnPropNameInTable="ConcordantColumn" msprop:Generator_ColumnVarNameInTable="columnConcordant" msprop:Generator_UserColumnName="Concordant" minOccurs="0">
+              <xs:element name="Concordant" msprop:Generator_UserColumnName="Concordant" msprop:Generator_ColumnPropNameInTable="ConcordantColumn" msprop:Generator_ColumnPropNameInRow="Concordant" msprop:Generator_ColumnVarNameInTable="columnConcordant" minOccurs="0">
                 <xs:simpleType>
                   <xs:restriction base="xs:string">
                     <xs:maxLength value="50" />

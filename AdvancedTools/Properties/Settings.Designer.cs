@@ -67,5 +67,17 @@ namespace AdvancedTools.Properties {
                 return ((string)(this["dbACCEConnectionString1"]));
             }
         }
+        
+        [global::System.Configuration.ApplicationScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.SpecialSettingAttribute(global::System.Configuration.SpecialSetting.ConnectionString)]
+        [global::System.Configuration.DefaultSettingValueAttribute("Data Source=94.126.205.95;Initial Catalog=dbCommon;Persist Security Info=True;Use" +
+            "r ID=DashBoard_Reader;Password=9i0uU9l_-A;Encrypt=True;TrustServerCertificate=Tr" +
+            "ue")]
+        public string dbCommonConnectionString1 {
+            get {
+                return ((string)(this["dbCommonConnectionString1"]));
+            }
+        }
     }
 }
