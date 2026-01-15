@@ -368,10 +368,10 @@ namespace AdvancedTools.Pages
                     return false;
                 }
 
-                // 3) Вывод содержимого MainTable (TOP N)
+                // 3) Вывод содержимого MainTable
                 try
                 {
-                    DumpTableTop(conn, mainFull, Math.Max(1, dumpRows), timeoutSeconds, Log);
+                    DumpTableTop(conn, mainFull, timeoutSeconds, Log);
                 }
                 catch (Exception ex)
                 {
@@ -385,9 +385,9 @@ namespace AdvancedTools.Pages
             }
         }
 
-        private static void DumpTableTop(SqlConnection conn, string fullQuotedName, int topN, int timeoutSeconds, Action<string> log)
+        private static void DumpTableTop(SqlConnection conn, string fullQuotedName, int timeoutSeconds, Action<string> log)
         {
-            var sql = $"SELECT TOP ({topN}) * FROM {fullQuotedName};";
+            var sql = $"SELECT * FROM {fullQuotedName};";
 
             using (var cmd = new SqlCommand(sql, conn))
             {
