@@ -32,11 +32,11 @@
 
         <!-- Поля X, Y, Z -->
         <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,15">
-            <TextBlock VerticalAlignment="Center" Margin="5">X:</TextBlock>
+            <TextBlock VerticalAlignment="Center" Margin="5">X (мм):</TextBlock>
             <TextBox Width="100" Margin="5" Name="XCoordTextBox"/>
-            <TextBlock VerticalAlignment="Center" Margin="5">Y:</TextBlock>
+            <TextBlock VerticalAlignment="Center" Margin="5">Y (мм):</TextBlock>
             <TextBox Width="100" Margin="5" Name="YCoordTextBox"/>
-            <TextBlock VerticalAlignment="Center" Margin="5">Z:</TextBlock>
+            <TextBlock VerticalAlignment="Center" Margin="5">Z (мм):</TextBlock>
             <TextBox Width="100" Margin="5" Name="ZCoordTextBox"/>
         </StackPanel>
 
