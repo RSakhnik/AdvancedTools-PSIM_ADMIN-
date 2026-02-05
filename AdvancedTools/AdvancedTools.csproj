@@ -51,6 +51,9 @@
     <Compile Include="Pages\BDIntexaWindow.xaml.cs">
       <DependentUpon>BDIntexaWindow.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Pages\BDdevLoaderWindow.xaml.cs">
+      <DependentUpon>BDdevLoaderWindow.xaml</DependentUpon>
+    </Compile>
     <Compile Include="Pages\BDLoaderWindow.xaml.cs">
       <DependentUpon>BDLoaderWindow.xaml</DependentUpon>
     </Compile>
@@ -71,6 +74,12 @@
       <AutoGen>True</AutoGen>
       <DesignTime>True</DesignTime>
       <DependentUpon>dbACCEDataSet.xsd</DependentUpon>
+    </Compile>
+    <Compile Include="Tools\DB devACCE\Data_dev.cs" />
+    <Compile Include="Tools\DB devACCE\dbdevACCE.Designer.cs">
+      <AutoGen>True</AutoGen>
+      <DesignTime>True</DesignTime>
+      <DependentUpon>dbdevACCE.xsd</DependentUpon>
     </Compile>
     <Compile Include="Tools\DB INTEXA\DataIntexa.cs" />
     <Compile Include="Tools\DB INTEXA\dbIntexa.cs">
@@ -98,6 +107,10 @@
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>
+    <Page Include="Pages\BDdevLoaderWindow.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="Pages\BDLoaderWindow.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
@@ -124,6 +137,17 @@
     </None>
     <None Include="Tools\DB ACCE\dbACCEDataSet.xss">
       <DependentUpon>dbACCEDataSet.xsd</DependentUpon>
+    </None>
+    <None Include="Tools\DB devACCE\dbdevACCE.xsc">
+      <DependentUpon>dbdevACCE.xsd</DependentUpon>
+    </None>
+    <None Include="Tools\DB devACCE\dbdevACCE.xsd">
+      <SubType>Designer</SubType>
+      <Generator>MSDataSetGenerator</Generator>
+      <LastGenOutput>dbdevACCE.Designer.cs</LastGenOutput>
+    </None>
+    <None Include="Tools\DB devACCE\dbdevACCE.xss">
+      <DependentUpon>dbdevACCE.xsd</DependentUpon>
     </None>
     <None Include="Tools\DB INTEXA\dbIntexa.xsc">
       <DependentUpon>dbIntexa.xsd</DependentUpon>

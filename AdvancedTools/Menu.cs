@@ -28,6 +28,7 @@ namespace AdvancedTools
         MoverWindow _moverWindow;
         BDLoaderWindow _bdLoaderWindow;
         BDIntexaWindow _bdIntexaWindow;
+        BDdevLoaderWindow _bddevLoaderWindow;
 
         public void Build(IMenuBuilder builder, MainViewContext context)
         {
@@ -35,7 +36,8 @@ namespace AdvancedTools
 
             item.WithSubmenu().AddItem("Mover", 0).WithHeader("Координация IFC");
             item.WithSubmenu().AddItem("DB_ACCE_Loader", 1).WithHeader("БД АССЕ");
-            item.WithSubmenu().AddItem("DB_INTEXA_Loader", 2).WithHeader("БД Интекса");
+            item.WithSubmenu().AddItem("DB_devACCE_Loader", 2).WithHeader("БД devАССЕ");
+            item.WithSubmenu().AddItem("DB_INTEXA_Loader", 3).WithHeader("БД Интекса");
 
 
         }
@@ -60,6 +62,11 @@ namespace AdvancedTools
             {
                 _bdIntexaWindow = new BDIntexaWindow();
                 _bdIntexaWindow.Show();
+            }
+            else if (name == "DB_devACCE_Loader")
+            {
+                _bddevLoaderWindow = new BDdevLoaderWindow();
+                _bddevLoaderWindow.Show();
             }
 
             
