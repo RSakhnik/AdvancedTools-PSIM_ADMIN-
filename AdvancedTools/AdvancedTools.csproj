@@ -57,6 +57,9 @@
     <Compile Include="Pages\BDLoaderWindow.xaml.cs">
       <DependentUpon>BDLoaderWindow.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Pages\FilesSizeReportWindow.xaml.cs">
+      <DependentUpon>FilesSizeReportWindow.xaml</DependentUpon>
+    </Compile>
     <Compile Include="Pages\MoverWindow.cs">
       <DependentUpon>MoverWindow.xaml</DependentUpon>
     </Compile>
@@ -112,6 +115,10 @@
       <SubType>Designer</SubType>
     </Page>
     <Page Include="Pages\BDLoaderWindow.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Include="Pages\FilesSizeReportWindow.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>
