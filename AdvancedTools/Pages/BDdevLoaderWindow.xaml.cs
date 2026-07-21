@@ -1,7 +1,10 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data.SqlClient;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Windows;
 using DatadevACCE;
@@ -14,7 +17,6 @@ namespace AdvancedTools.Pages
     {
         private BackgroundWorker _bw;
 
-        // TableAdapters как в FormACCE
         private MainTableTableAdapter _mainTableAdapter;
         private PipeComponentsTableAdapter _pipeCompAdapter;
         private DiameterTableAdapter _diamAdapter;
@@ -24,13 +26,27 @@ namespace AdvancedTools.Pages
         private InstrumentationTableAdapter _instAdapter;
         private ConcreteTableAdapter _concreteAdapter;
 
-        // Строка подключения из Settings
-        private string ConnectionString = global::AdvancedTools.Properties.Settings.Default.dbDevACCEConnectionString;
+        private readonly string ConnectionString =
+            global::AdvancedTools.Properties.Settings.Default.dbDevACCEConnectionString;
+
+        // При необходимости подстрой под реальные имена колонок БД
+        private const string ProjectColumnName = "Project";
+        private const string StageColumnName = "Phase";
 
         public BDdevLoaderWindow()
         {
             InitializeComponent();
         }
+
+        private sealed class FileIdentity
+        {
+            public string Stage { get; set; }
+            public string Project { get; set; }
+            public bool IsDelete { get; set; }
+            public string FileName { get; set; }
+        }
+
+        #region UI
 
         private void BrowseButton_Click(object sender, RoutedEventArgs e)
         {
@@ -47,7 +63,31 @@ namespace AdvancedTools.Pages
             }
         }
 
-        // ====== Проверка подключения + вывод содержимого MainTable ======
+        private void StartButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(FolderTextBox.Text) || !Directory.Exists(FolderTextBox.Text))
+            {
+                AppendLog("⚠ Не выбрана корректная папка с отчётами.");
+                return;
+            }
+
+            ToggleUi(false);
+            Progress.IsIndeterminate = true;
+            Progress.Value = 0;
+            StatusText.Text = "Обработка…";
+
+            _bw = new BackgroundWorker { WorkerReportsProgress = true };
+            _bw.DoWork += Bw_DoWork;
+            _bw.ProgressChanged += Bw_ProgressChanged;
+            _bw.RunWorkerCompleted += Bw_RunWorkerCompleted;
+            _bw.RunWorkerAsync(FolderTextBox.Text);
+        }
+
+        private void ClearLogButton_Click(object sender, RoutedEventArgs e)
+        {
+            LogTextBox.Clear();
+        }
+
         private void TestConnectionButton_Click(object sender, RoutedEventArgs e)
         {
             TestConnectionButton.IsEnabled = false;
@@ -105,127 +145,6 @@ namespace AdvancedTools.Pages
             bw.RunWorkerAsync();
         }
 
-        private void StartButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (string.IsNullOrWhiteSpace(FolderTextBox.Text) || !Directory.Exists(FolderTextBox.Text))
-            {
-                AppendLog("⚠ Не выбрана корректная папка с отчётами.");
-                return;
-            }
-
-            ToggleUi(false);
-            Progress.IsIndeterminate = true;
-            Progress.Value = 0;
-            StatusText.Text = "Загрузка…";
-
-            _bw = new BackgroundWorker { WorkerReportsProgress = true };
-            _bw.DoWork += Bw_DoWork;
-            _bw.ProgressChanged += Bw_ProgressChanged;
-            _bw.RunWorkerCompleted += Bw_RunWorkerCompleted;
-            _bw.RunWorkerAsync(FolderTextBox.Text);
-        }
-
-        private void Bw_DoWork(object sender, DoWorkEventArgs e)
-        {
-            string folder = (string)e.Argument;
-
-            // привязываем лог к UI
-            Data_dev.ReportsFolder = folder;
-            Data_dev.Log = msg => _bw.ReportProgress(-1, msg);
-
-            try
-            {
-                // 1) Загружаем Excel в DataTables (без БД)
-                var result = Data_dev.GetData(_bw, startProgress: 0);
-
-                // 2) Подключаемся к БД
-                var cs = GetConnectionStringOrThrow();
-                using (var sqlConn = new SqlConnection(cs))
-                {
-                    sqlConn.Open();
-
-                    // 3) Очищаем таблицы (БЕЗ ALTER CONSTRAINT)
-                    CleanUpTables(sqlConn);
-
-                    // 4) Инициализируем TableAdapter’ы поверх этого подключения
-                    InitAdapters(sqlConn);
-
-                    // 5) Записываем данные
-                    _bw.ReportProgress(-1, "Запись данных в БД…");
-
-                    int u1 = _mainTableAdapter.Update(result.MainTable);
-                    _bw.ReportProgress(15);
-
-                    int u2 = _pipeCompAdapter.Update(result.PipeComponents);
-                    _bw.ReportProgress(30);
-
-                    int u3 = _diamAdapter.Update(result.Diameter);
-                    _bw.ReportProgress(45);
-
-                    int u4 = _insuPaintAdapter.Update(result.InsuPaint);
-                    _bw.ReportProgress(60);
-
-                    int u5 = _steelAdapter.Update(result.Steel);
-                    _bw.ReportProgress(70);
-
-                    int u6 = _cableAdapter.Update(result.Cable);
-                    _bw.ReportProgress(80);
-
-                    int u7 = _instAdapter.Update(result.Instrumentation);
-                    _bw.ReportProgress(90);
-
-                    int u8 = _concreteAdapter.Update(result.Concrete);
-                    _bw.ReportProgress(95);
-
-                    _bw.ReportProgress(-1,
-                        $"Записано строк: Main={u1}, PipeComp={u2}, Diam={u3}, InsuPaint={u4}, Steel={u5}, Cable={u6}, Inst={u7}, Concrete={u8}");
-                }
-
-                _bw.ReportProgress(100);
-            }
-            catch (Exception ex)
-            {
-                _bw.ReportProgress(-1, "❌ Ошибка: " + ex.Message);
-                throw;
-            }
-        }
-
-        private void Bw_ProgressChanged(object sender, ProgressChangedEventArgs e)
-        {
-            if (e.UserState is string s && !string.IsNullOrEmpty(s))
-                AppendLog(s);
-
-            if (e.ProgressPercentage >= 0)
-            {
-                Progress.IsIndeterminate = false;
-                Progress.Value = Math.Min(100, e.ProgressPercentage);
-                StatusText.Text = $"Processing… {Progress.Value:0}%";
-            }
-        }
-
-        private void Bw_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
-        {
-            if (e.Error == null)
-            {
-                AppendLog("✔ Готово.");
-                StatusText.Text = "Готово";
-                Progress.Value = 100;
-            }
-            else
-            {
-                AppendLog("❌ Завершено с ошибкой.");
-                StatusText.Text = "Ошибка";
-            }
-
-            ToggleUi(true);
-            Progress.IsIndeterminate = false;
-        }
-
-        private void ClearLogButton_Click(object sender, RoutedEventArgs e)
-        {
-            LogTextBox.Clear();
-        }
-
         private void ToggleUi(bool enabled)
         {
             BrowseButton.IsEnabled = enabled;
@@ -251,9 +170,215 @@ namespace AdvancedTools.Pages
             }
         }
 
-        // === БЛОК РАБОТЫ С БД ===
+        private void Bw_ProgressChanged(object sender, ProgressChangedEventArgs e)
+        {
+            if (e.UserState is string s && !string.IsNullOrWhiteSpace(s))
+                AppendLog(s);
 
-        private void InitAdapters(SqlConnection conn)
+            if (e.ProgressPercentage >= 0)
+            {
+                Progress.IsIndeterminate = false;
+                Progress.Value = Math.Min(100, e.ProgressPercentage);
+                StatusText.Text = $"Processing… {Progress.Value:0}%";
+            }
+        }
+
+        private void Bw_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
+        {
+            if (e.Error == null)
+            {
+                AppendLog("✔ Готово.");
+                StatusText.Text = "Готово";
+                Progress.Value = 100;
+            }
+            else
+            {
+                AppendLog("❌ Завершено с ошибкой: " + e.Error.Message);
+                if (e.Error.InnerException != null)
+                    AppendLog("   INNER: " + e.Error.InnerException.Message);
+
+                StatusText.Text = "Ошибка";
+            }
+
+            ToggleUi(true);
+            Progress.IsIndeterminate = false;
+        }
+
+        #endregion
+
+        #region Main workflow
+
+        private void Bw_DoWork(object sender, DoWorkEventArgs e)
+        {
+            string folder = (string)e.Argument;
+            var files = EnumerateExcelFiles(folder).ToList();
+
+            if (files.Count == 0)
+                throw new InvalidOperationException("В папке не найдено Excel-файлов.");
+
+            ReportLog($"Найдено файлов: {files.Count}");
+
+            string cs = GetConnectionStringOrThrow();
+
+            using (var sqlConn = new SqlConnection(cs))
+            {
+                sqlConn.Open();
+
+                for (int i = 0; i < files.Count; i++)
+                {
+                    string filePath = files[i];
+                    var fileIdentity = ParseFileIdentity(filePath);
+
+                    ReportLog(string.Empty);
+                    ReportLog($"=== [{i + 1}/{files.Count}] {fileIdentity.FileName} ===");
+                    ReportLog($"Stage = {fileIdentity.Stage}, Project = {fileIdentity.Project}, Delete = {fileIdentity.IsDelete}");
+
+                    ProcessSingleFile(sqlConn, filePath, fileIdentity);
+
+                    int progress = (int)Math.Round((i + 1) * 100.0 / files.Count);
+                    ReportProgress(progress);
+                }
+            }
+        }
+
+        private void ProcessSingleFile(SqlConnection sqlConn, string filePath, FileIdentity fileIdentity)
+        {
+            using (var tx = sqlConn.BeginTransaction())
+            {
+                try
+                {
+                    InitAdapters(sqlConn, tx);
+
+                    int deleted = DeleteRecordsByProjectStage(sqlConn, tx, fileIdentity.Project, fileIdentity.Stage);
+                    ReportLog($"Удалено старых строк: {deleted}");
+
+                    if (!fileIdentity.IsDelete)
+                    {
+                        var result = LoadSingleFile(filePath);
+
+                        int u1 = _mainTableAdapter.Update(result.MainTable);
+                        int u2 = _pipeCompAdapter.Update(result.PipeComponents);
+                        int u3 = _diamAdapter.Update(result.Diameter);
+                        int u4 = _insuPaintAdapter.Update(result.InsuPaint);
+                        int u5 = _steelAdapter.Update(result.Steel);
+                        int u6 = _cableAdapter.Update(result.Cable);
+                        int u7 = _instAdapter.Update(result.Instrumentation);
+                        int u8 = _concreteAdapter.Update(result.Concrete);
+
+                        ReportLog(
+                            $"Записано строк: Main={u1}, PipeComp={u2}, Diam={u3}, InsuPaint={u4}, Steel={u5}, Cable={u6}, Inst={u7}, Concrete={u8}");
+                    }
+                    else
+                    {
+                        ReportLog("Файл помечен как DELETE, загрузка новых данных не выполняется.");
+                    }
+
+                    tx.Commit();
+                }
+                catch
+                {
+                    try { tx.Rollback(); } catch { }
+                    throw;
+                }
+            }
+        }
+
+        private LoadResult LoadSingleFile(string filePath)
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "BDdevLoader_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            var oldReportsFolder = Data_dev.ReportsFolder;
+            var oldLog = Data_dev.Log;
+
+            try
+            {
+                string copiedFile = Path.Combine(tempDir, Path.GetFileName(filePath));
+                File.Copy(filePath, copiedFile, true);
+
+                Data_dev.ReportsFolder = tempDir;
+                Data_dev.Log = msg =>
+                {
+                    // подавляем шум про временную папку
+                    if (!string.IsNullOrWhiteSpace(msg) &&
+                        msg.StartsWith("Найдено Excel-файлов:", StringComparison.OrdinalIgnoreCase))
+                        return;
+
+                    ReportLog(msg);
+                };
+
+                return Data_dev.GetData(_bw, 0);
+            }
+            finally
+            {
+                Data_dev.ReportsFolder = oldReportsFolder;
+                Data_dev.Log = oldLog;
+
+                try
+                {
+                    if (Directory.Exists(tempDir))
+                        Directory.Delete(tempDir, true);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        #endregion
+
+        #region File parsing
+
+        private static IEnumerable<string> EnumerateExcelFiles(string folder)
+        {
+            return Directory.EnumerateFiles(folder, "*.*", SearchOption.TopDirectoryOnly)
+                .Where(path =>
+                {
+                    string ext = Path.GetExtension(path);
+                    return ext.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+                        || ext.Equals(".xlsm", StringComparison.OrdinalIgnoreCase)
+                        || ext.Equals(".xls", StringComparison.OrdinalIgnoreCase);
+                })
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static FileIdentity ParseFileIdentity(string filePath)
+        {
+            string fileName = Path.GetFileName(filePath);
+            string baseName = Path.GetFileNameWithoutExtension(fileName)?.Trim();
+
+            if (string.IsNullOrWhiteSpace(baseName))
+                throw new InvalidOperationException("Пустое имя файла.");
+
+            bool isDelete = baseName.IndexOf("DELETE", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            string cleaned = baseName.Replace("DELETE", "").Trim();
+
+            while (cleaned.Contains(".."))
+                cleaned = cleaned.Replace("..", ".");
+
+            cleaned = cleaned.Trim('.').Trim();
+
+            var parts = cleaned.Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries);
+
+            if (parts.Length < 2)
+                throw new InvalidOperationException(
+                    $"Имя файла '{fileName}' не соответствует формату '<STAGE>.<PROJECT>.xlsx'.");
+
+            return new FileIdentity
+            {
+                Stage = parts[0].Trim(),
+                Project = parts[1].Trim(),
+                IsDelete = isDelete,
+                FileName = fileName
+            };
+        }
+
+        #endregion
+
+        #region TableAdapters and transaction binding
+
+        private void InitAdapters(SqlConnection conn, SqlTransaction tx)
         {
             _mainTableAdapter = new MainTableTableAdapter { Connection = conn };
             _pipeCompAdapter = new PipeComponentsTableAdapter { Connection = conn };
@@ -263,47 +388,252 @@ namespace AdvancedTools.Pages
             _cableAdapter = new CableTableAdapter { Connection = conn };
             _instAdapter = new InstrumentationTableAdapter { Connection = conn };
             _concreteAdapter = new ConcreteTableAdapter { Connection = conn };
+
+            PrepareAdapterForTransaction(_mainTableAdapter, tx);
+            PrepareAdapterForTransaction(_pipeCompAdapter, tx);
+            PrepareAdapterForTransaction(_diamAdapter, tx);
+            PrepareAdapterForTransaction(_insuPaintAdapter, tx);
+            PrepareAdapterForTransaction(_steelAdapter, tx);
+            PrepareAdapterForTransaction(_cableAdapter, tx);
+            PrepareAdapterForTransaction(_instAdapter, tx);
+            PrepareAdapterForTransaction(_concreteAdapter, tx);
         }
 
-        private void CleanUpTables(SqlConnection sqlConn)
+        private static void PrepareAdapterForTransaction(object adapter, SqlTransaction tx)
         {
-            AppendLog("Очистка таблиц");
+            if (adapter == null)
+                throw new ArgumentNullException(nameof(adapter));
+            if (tx == null)
+                throw new ArgumentNullException(nameof(tx));
 
-            // Обычно MainTable является "родительской", поэтому чистим её последней.
-            // Порядок: дочерние -> родительские
-            DeleteAll(sqlConn, "Concrete");
-            DeleteAll(sqlConn, "Instrumentation");
-            DeleteAll(sqlConn, "Cable");
-            DeleteAll(sqlConn, "Steel");
-            DeleteAll(sqlConn, "InsuPaint");
-            DeleteAll(sqlConn, "Diameter");
-            DeleteAll(sqlConn, "PipeComponents");
-            DeleteAll(sqlConn, "MainTable");
-        }
+            var type = adapter.GetType();
 
-        private void DeleteAll(SqlConnection sqlConn, string tableName)
-        {
-            string full = FindTableFullName(sqlConn, tableName, timeoutSeconds: 10);
-            if (string.IsNullOrWhiteSpace(full))
-                throw new InvalidOperationException($"Таблица '{tableName}' не найдена (или нет прав на просмотр метаданных).");
+            // 1) Прогреваем CommandCollection, если она создаётся лениво
+            var commandCollectionProp = type.GetProperty(
+                "CommandCollection",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
 
-            using (var cmd = new SqlCommand($"DELETE FROM {full};", sqlConn))
+            SqlCommand[] commandCollection = null;
+            if (commandCollectionProp != null)
             {
-                cmd.CommandTimeout = 60;
-                int n = cmd.ExecuteNonQuery();
-                AppendLog($"  - очищено {n} строк из {full}");
+                commandCollection = commandCollectionProp.GetValue(adapter, null) as SqlCommand[];
+            }
+
+            // 2) Прогреваем Adapter и его Insert/Update/Delete commands
+            var adapterProp = type.GetProperty(
+                "Adapter",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+            var dataAdapter = adapterProp?.GetValue(adapter, null) as SqlDataAdapter;
+
+            if (dataAdapter != null)
+            {
+                AttachCommandToTransaction(dataAdapter.SelectCommand, tx);
+                AttachCommandToTransaction(dataAdapter.InsertCommand, tx);
+                AttachCommandToTransaction(dataAdapter.UpdateCommand, tx);
+                AttachCommandToTransaction(dataAdapter.DeleteCommand, tx);
+            }
+
+            // 3) CommandCollection
+            if (commandCollection != null)
+            {
+                foreach (var cmd in commandCollection)
+                    AttachCommandToTransaction(cmd, tx);
+            }
+
+            // 4) На всякий случай пробегаем по полям
+            foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public))
+            {
+                if (typeof(SqlCommand).IsAssignableFrom(field.FieldType))
+                {
+                    var cmd = field.GetValue(adapter) as SqlCommand;
+                    AttachCommandToTransaction(cmd, tx);
+                }
+                else if (field.FieldType == typeof(SqlCommand[]))
+                {
+                    var cmds = field.GetValue(adapter) as SqlCommand[];
+                    if (cmds != null)
+                    {
+                        foreach (var cmd in cmds)
+                            AttachCommandToTransaction(cmd, tx);
+                    }
+                }
             }
         }
 
-        // ====== helpers ======
+        private static void AttachCommandToTransaction(SqlCommand cmd, SqlTransaction tx)
+        {
+            if (cmd == null)
+                return;
+
+            cmd.Connection = tx.Connection;
+            cmd.Transaction = tx;
+        }
+
+        private void BindAdaptersToTransaction(SqlTransaction tx)
+        {
+            BindAdapterTransaction(_mainTableAdapter, tx);
+            BindAdapterTransaction(_pipeCompAdapter, tx);
+            BindAdapterTransaction(_diamAdapter, tx);
+            BindAdapterTransaction(_insuPaintAdapter, tx);
+            BindAdapterTransaction(_steelAdapter, tx);
+            BindAdapterTransaction(_cableAdapter, tx);
+            BindAdapterTransaction(_instAdapter, tx);
+            BindAdapterTransaction(_concreteAdapter, tx);
+        }
+
+        private static void BindAdapterTransaction(object adapter, SqlTransaction tx)
+        {
+            if (adapter == null || tx == null)
+                return;
+
+            var type = adapter.GetType();
+
+            // 1) Явные SqlCommand-поля
+            foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public))
+            {
+                if (typeof(SqlCommand).IsAssignableFrom(field.FieldType))
+                {
+                    var cmd = field.GetValue(adapter) as SqlCommand;
+                    if (cmd != null)
+                        cmd.Transaction = tx;
+                }
+
+                if (field.FieldType == typeof(SqlCommand[]))
+                {
+                    var cmds = field.GetValue(adapter) as SqlCommand[];
+                    if (cmds != null)
+                    {
+                        foreach (var cmd in cmds)
+                        {
+                            if (cmd != null)
+                                cmd.Transaction = tx;
+                        }
+                    }
+                }
+            }
+
+            // 2) Свойства Insert/Update/DeleteCommand
+            foreach (var propName in new[] { "InsertCommand", "UpdateCommand", "DeleteCommand" })
+            {
+                var prop = type.GetProperty(propName,
+                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+                var cmd = prop?.GetValue(adapter, null) as SqlCommand;
+                if (cmd != null)
+                    cmd.Transaction = tx;
+            }
+
+            // 3) CommandCollection
+            var cmdCollectionProp = type.GetProperty("CommandCollection",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+            var commandCollection = cmdCollectionProp?.GetValue(adapter, null) as SqlCommand[];
+            if (commandCollection != null)
+            {
+                foreach (var cmd in commandCollection)
+                {
+                    if (cmd != null)
+                        cmd.Transaction = tx;
+                }
+            }
+        }
+
+        #endregion
+
+        #region Delete logic
+
+        private int DeleteRecordsByProjectStage(SqlConnection conn, SqlTransaction tx, string project, string stage)
+        {
+            int total = 0;
+
+            total += DeleteByProjectStage(conn, tx, "Concrete", project, stage);
+            total += DeleteByProjectStage(conn, tx, "Instrumentation", project, stage);
+            total += DeleteByProjectStage(conn, tx, "Cable", project, stage);
+            total += DeleteByProjectStage(conn, tx, "Steel", project, stage);
+            total += DeleteByProjectStage(conn, tx, "InsuPaint", project, stage);
+            total += DeleteByProjectStage(conn, tx, "Diameter", project, stage);
+            total += DeleteByProjectStage(conn, tx, "PipeComponents", project, stage);
+            total += DeleteByProjectStage(conn, tx, "MainTable", project, stage);
+
+            return total;
+        }
+
+        private int DeleteByProjectStage(SqlConnection conn, SqlTransaction tx, string tableName, string project, string stage)
+        {
+            string fullTableName = FindTableFullName(conn, tx, tableName, 10);
+            if (string.IsNullOrWhiteSpace(fullTableName))
+                throw new InvalidOperationException($"Таблица '{tableName}' не найдена.");
+
+            string sql = $@"
+DELETE FROM {fullTableName}
+WHERE [{ProjectColumnName}] = @project
+  AND [{StageColumnName}] = @stage;";
+
+            using (var cmd = new SqlCommand(sql, conn, tx))
+            {
+                cmd.CommandTimeout = 120;
+                cmd.Parameters.AddWithValue("@project", project);
+                cmd.Parameters.AddWithValue("@stage", stage);
+
+                int n = cmd.ExecuteNonQuery();
+                ReportLog($"  - {tableName}: удалено {n}");
+                return n;
+            }
+        }
+
+        #endregion
+
+        #region DB helpers
 
         private string GetConnectionStringOrThrow()
         {
             if (!string.IsNullOrWhiteSpace(ConnectionString))
                 return ConnectionString;
 
-            throw new InvalidOperationException("Не найдена строка подключения (ConnectionString). Проверь Settings/app.config.");
+            throw new InvalidOperationException("Не найдена строка подключения.");
         }
+
+        private static string FindTableFullName(SqlConnection conn, string tableName, int timeoutSeconds)
+        {
+            return FindTableFullName(conn, null, tableName, timeoutSeconds);
+        }
+
+        private static string FindTableFullName(SqlConnection conn, SqlTransaction tx, string tableName, int timeoutSeconds)
+        {
+            const string sql = @"
+SELECT TOP 1 QUOTENAME(s.name) + '.' + QUOTENAME(t.name)
+FROM sys.tables t
+JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE t.name = @name
+ORDER BY CASE WHEN s.name='dbo' THEN 0 ELSE 1 END, s.name;";
+
+            using (var cmd = new SqlCommand(sql, conn, tx))
+            {
+                cmd.CommandTimeout = Math.Max(1, timeoutSeconds);
+                cmd.Parameters.AddWithValue("@name", tableName);
+                return cmd.ExecuteScalar() as string;
+            }
+        }
+
+        private static string MaskPassword(string connectionString)
+        {
+            try
+            {
+                var b = new SqlConnectionStringBuilder(connectionString);
+                if (!string.IsNullOrEmpty(b.Password))
+                    b.Password = "*****";
+                return b.ConnectionString;
+            }
+            catch
+            {
+                return connectionString;
+            }
+        }
+
+        #endregion
+
+        #region Connection test
 
         /// <summary>
         /// Проверяет подключение, базовые права на MainTable и выводит TOP N строк MainTable в лог.
@@ -334,7 +664,6 @@ namespace AdvancedTools.Pages
                     return false;
                 }
 
-                // 1) Проверим, что MainTable существует и доступна
                 string mainFull;
                 try
                 {
@@ -352,7 +681,6 @@ namespace AdvancedTools.Pages
                     return false;
                 }
 
-                // 2) Проверим основные права (то, что тебе реально нужно для “обновлять данные”)
                 try
                 {
                     var (canSel, canIns, canUpd, canDel) = GetBasicObjectPermissions(conn, mainFull, timeoutSeconds);
@@ -368,10 +696,9 @@ namespace AdvancedTools.Pages
                     return false;
                 }
 
-                // 3) Вывод содержимого MainTable
                 try
                 {
-                    DumpTableTop(conn, mainFull, timeoutSeconds, Log);
+                    DumpTableTop(conn, mainFull, timeoutSeconds, Log, dumpRows);
                 }
                 catch (Exception ex)
                 {
@@ -383,65 +710,6 @@ namespace AdvancedTools.Pages
 
                 return true;
             }
-        }
-
-        private static void DumpTableTop(SqlConnection conn, string fullQuotedName, int timeoutSeconds, Action<string> log)
-        {
-            var sql = $"SELECT * FROM {fullQuotedName};";
-
-            using (var cmd = new SqlCommand(sql, conn))
-            {
-                cmd.CommandTimeout = Math.Max(1, timeoutSeconds);
-
-                using (var rd = cmd.ExecuteReader())
-                {
-                    if (!rd.HasRows)
-                    {
-                        log($"[MainTable] {fullQuotedName}: таблица пустая");
-                        return;
-                    }
-
-                    // Заголовок
-                    var header = new StringBuilder();
-                    header.Append("[MainTable] Columns: ");
-                    for (int i = 0; i < rd.FieldCount; i++)
-                    {
-                        if (i > 0) header.Append(" | ");
-                        header.Append(rd.GetName(i));
-                    }
-                    log(header.ToString());
-
-                    int rowIdx = 0;
-                    while (rd.Read())
-                    {
-                        rowIdx++;
-                        var line = new StringBuilder();
-                        line.Append($"[MainTable] Row {rowIdx}: ");
-
-                        for (int i = 0; i < rd.FieldCount; i++)
-                        {
-                            if (i > 0) line.Append(" | ");
-
-                            object val = rd.IsDBNull(i) ? null : rd.GetValue(i);
-                            string s = val == null ? "NULL" : val.ToString();
-
-                            // чтобы лог не превращался в свалку
-                            s = TrimForLog(s, 80);
-                            line.Append(s);
-                        }
-
-                        log(line.ToString());
-                    }
-                }
-            }
-        }
-
-        private static string TrimForLog(string s, int maxLen)
-        {
-            if (string.IsNullOrEmpty(s)) return s;
-            s = s.Replace("\r", " ").Replace("\n", " ").Trim();
-            if (s.Length <= maxLen) return s;
-            return s.Substring(0, maxLen) + "…";
         }
 
         private static (bool canSelect, bool canInsert, bool canUpdate, bool canDelete)
@@ -473,37 +741,80 @@ SELECT
             }
         }
 
-        // Ищем таблицу по имени, возвращаем [schema].[table]
-        private static string FindTableFullName(SqlConnection conn, string tableName, int timeoutSeconds)
+        private static void DumpTableTop(SqlConnection conn, string fullQuotedName, int timeoutSeconds, Action<string> log, int dumpRows)
         {
-            const string sql = @"
-SELECT TOP 1 QUOTENAME(s.name) + '.' + QUOTENAME(t.name)
-FROM sys.tables t
-JOIN sys.schemas s ON s.schema_id = t.schema_id
-WHERE t.name = @name
-ORDER BY CASE WHEN s.name='dbo' THEN 0 ELSE 1 END, s.name;";
+            string sql = $"SELECT TOP ({Math.Max(1, dumpRows)}) * FROM {fullQuotedName};";
 
             using (var cmd = new SqlCommand(sql, conn))
             {
                 cmd.CommandTimeout = Math.Max(1, timeoutSeconds);
-                cmd.Parameters.AddWithValue("@name", tableName);
-                return cmd.ExecuteScalar() as string;
+
+                using (var rd = cmd.ExecuteReader())
+                {
+                    if (!rd.HasRows)
+                    {
+                        log($"[MainTable] {fullQuotedName}: таблица пустая");
+                        return;
+                    }
+
+                    var header = new StringBuilder();
+                    header.Append("[MainTable] Columns: ");
+                    for (int i = 0; i < rd.FieldCount; i++)
+                    {
+                        if (i > 0) header.Append(" | ");
+                        header.Append(rd.GetName(i));
+                    }
+                    log(header.ToString());
+
+                    int rowIdx = 0;
+                    while (rd.Read())
+                    {
+                        rowIdx++;
+                        var line = new StringBuilder();
+                        line.Append($"[MainTable] Row {rowIdx}: ");
+
+                        for (int i = 0; i < rd.FieldCount; i++)
+                        {
+                            if (i > 0) line.Append(" | ");
+
+                            object val = rd.IsDBNull(i) ? null : rd.GetValue(i);
+                            string s = val == null ? "NULL" : val.ToString();
+                            s = TrimForLog(s, 80);
+                            line.Append(s);
+                        }
+
+                        log(line.ToString());
+                    }
+                }
             }
         }
 
-        private static string MaskPassword(string connectionString)
+        private static string TrimForLog(string s, int maxLen)
         {
-            try
-            {
-                var b = new SqlConnectionStringBuilder(connectionString);
-                if (!string.IsNullOrEmpty(b.Password))
-                    b.Password = "*****";
-                return b.ConnectionString;
-            }
-            catch
-            {
-                return connectionString;
-            }
+            if (string.IsNullOrEmpty(s))
+                return s;
+
+            s = s.Replace("\r", " ").Replace("\n", " ").Trim();
+            if (s.Length <= maxLen)
+                return s;
+
+            return s.Substring(0, maxLen) + "…";
         }
+
+        #endregion
+
+        #region Logging helpers
+
+        private void ReportLog(string message)
+        {
+            _bw?.ReportProgress(-1, message);
+        }
+
+        private void ReportProgress(int progress)
+        {
+            _bw?.ReportProgress(progress);
+        }
+
+        #endregion
     }
 }
