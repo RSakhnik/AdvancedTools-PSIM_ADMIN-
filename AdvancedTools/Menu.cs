@@ -1,5 +1,5 @@
-﻿using AdvancedTools.Pages;
-using Ascon.Pilot.Bim.SDK;
+using AdvancedTools.BimBridge;
+using AdvancedTools.Pages;
 using Ascon.Pilot.Bim.SDK.ModelStorage;
 using Ascon.Pilot.SDK;
 using Ascon.Pilot.SDK.Menu;
@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.ComponentModel.Composition;
 using System.Linq;
 using System.Windows;
+using System.Windows.Threading;
 using PilotDataObject = Ascon.Pilot.SDK.IDataObject;
 
 namespace AdvancedTools
@@ -20,32 +21,37 @@ namespace AdvancedTools
     {
         private const string FilesSizeReportSelectedCommand = "Files_Size_Report_Selected";
         private const string FilesSizeReportToolbarCommand = "Files_Size_Report_Toolbar";
+        private const string BimBridgeCommand = "BIM_Bridge_Worker";
+
+        private static readonly object BimBridgeHostGate = new object();
+        private static IObjectsRepository _sharedBimBridgeRepository;
+        private static BimBridgeHost _sharedBimBridgeHost;
 
         private readonly IPilotServiceProvider _pilotServiceProvider;
         private readonly IObjectsRepository _objectsRepository;
         private readonly ISearchService _searchService;
         private readonly ITabServiceProvider _tabServiceProvider;
+        private BimBridgeHost _bimBridgeHost;
+        private string _bimBridgeInitializationError;
 
         private IModelStorageProvider _modelManager;
-
         private IPerson _specificPerson;
 
-
-        // Pages
-        MoverWindow _moverWindow;
-        BDLoaderWindow _bdLoaderWindow;
-        BDIntexaWindow _bdIntexaWindow;
-        BDdevLoaderWindow _bddevLoaderWindow;
-        FilesSizeReportWindow _filesSizeReportWindow;
+        private MoverWindow _moverWindow;
+        private BDLoaderWindow _bdLoaderWindow;
+        private BDIntexaWindow _bdIntexaWindow;
+        private BDdevLoaderWindow _bddevLoaderWindow;
+        private FilesSizeReportWindow _filesSizeReportWindow;
 
         public void Build(IMenuBuilder builder, MainViewContext context)
         {
             var item = builder.AddItem("AdvancedTools", 1).WithHeader("ГПН.Утилиты.Админ");
-
-            item.WithSubmenu().AddItem("Mover", 0).WithHeader("Координация IFC");
-            item.WithSubmenu().AddItem("DB_ACCE_Loader", 1).WithHeader("БД АССЕ");
-            item.WithSubmenu().AddItem("DB_devACCE_Loader", 2).WithHeader("БД devАССЕ");
-            item.WithSubmenu().AddItem("DB_INTEXA_Loader", 3).WithHeader("БД Интекса");
+            var submenu = item.WithSubmenu();
+            submenu.AddItem("Mover", 0).WithHeader("Координация IFC");
+            submenu.AddItem("DB_ACCE_Loader", 1).WithHeader("БД АССЕ");
+            submenu.AddItem("DB_devACCE_Loader", 2).WithHeader("БД devАССЕ");
+            submenu.AddItem("DB_INTEXA_Loader", 3).WithHeader("БД Интекса");
+            submenu.AddItem(BimBridgeCommand, 4).WithHeader("BIM Bridge");
         }
 
         public void Build(IMenuBuilder builder, ObjectsViewContext context)
@@ -82,18 +88,14 @@ namespace AdvancedTools
         {
             if (name == "Mover")
             {
-
                 _moverWindow = new MoverWindow();
                 _moverWindow.Show();
-
             }
-
             else if (name == "DB_ACCE_Loader")
             {
                 _bdLoaderWindow = new BDLoaderWindow();
                 _bdLoaderWindow.Show();
             }
-
             else if (name == "DB_INTEXA_Loader")
             {
                 _bdIntexaWindow = new BDIntexaWindow();
@@ -104,13 +106,16 @@ namespace AdvancedTools
                 _bddevLoaderWindow = new BDdevLoaderWindow();
                 _bddevLoaderWindow.Show();
             }
+            else if (name == BimBridgeCommand)
+            {
+                ShowBimBridgeWindow();
+            }
         }
 
         public void OnMenuItemClick(string name, ObjectsViewContext context)
         {
             if (name != FilesSizeReportSelectedCommand)
                 return;
-
             ShowFilesSizeReportForSelectedObjects(context);
         }
 
@@ -118,14 +123,12 @@ namespace AdvancedTools
         {
             if (name != FilesSizeReportToolbarCommand)
                 return;
-
             ShowFilesSizeReportForSelectedObjects(context);
         }
 
         private void ShowFilesSizeReportForSelectedObjects(ObjectsViewContext context)
         {
             var selectedObjects = GetSelectedObjects(context);
-
             if (selectedObjects.Count == 0)
             {
                 MessageBox.Show("Выберите объект, папку или проект в дереве документов Pilot.", "Размер файлов БД",
@@ -144,21 +147,93 @@ namespace AdvancedTools
                 : context.SelectedObjects.ToList();
         }
 
-
         [ImportingConstructor]
-        public Menu(IPilotServiceProvider pilotServiceProvider, IObjectsRepository objectsRepository, ISearchService searchService, ITabServiceProvider tabServiceProvider)
+        public Menu(
+            IPilotServiceProvider pilotServiceProvider,
+            IObjectsRepository objectsRepository,
+            ISearchService searchService,
+            ITabServiceProvider tabServiceProvider)
         {
             _pilotServiceProvider = pilotServiceProvider;
             _objectsRepository = objectsRepository;
             _tabServiceProvider = tabServiceProvider;
             _searchService = searchService;
-
             _modelManager = _pilotServiceProvider.GetServices<IModelStorageProvider>().FirstOrDefault();
-
             _specificPerson = _objectsRepository.GetCurrentPerson();
         }
 
+        private void ShowBimBridgeWindow()
+        {
+            var applicationDispatcher = Application.Current?.Dispatcher;
+            if (applicationDispatcher != null && !applicationDispatcher.CheckAccess())
+            {
+                applicationDispatcher.BeginInvoke(
+                    new Action(ShowBimBridgeWindow),
+                    DispatcherPriority.Normal);
+                return;
+            }
 
+            EnsureBimBridgeHostInitialized();
+            if (_bimBridgeHost != null)
+            {
+                _bimBridgeHost.ShowWindow();
+                return;
+            }
 
+            MessageBox.Show(
+                "BIM Bridge не удалось инициализировать.\n\n" + (_bimBridgeInitializationError ?? "Причина неизвестна."),
+                "BIM Bridge", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        private void EnsureBimBridgeHostInitialized()
+        {
+            if (_bimBridgeHost != null)
+                return;
+
+            _bimBridgeHost = GetOrCreateBimBridgeHost(
+                _pilotServiceProvider,
+                _objectsRepository,
+                _searchService,
+                _tabServiceProvider,
+                out _bimBridgeInitializationError);
+        }
+
+        private static BimBridgeHost GetOrCreateBimBridgeHost(
+            IPilotServiceProvider pilotServiceProvider,
+            IObjectsRepository objectsRepository,
+            ISearchService searchService,
+            ITabServiceProvider tabServiceProvider,
+            out string initializationError)
+        {
+            lock (BimBridgeHostGate)
+            {
+                if (_sharedBimBridgeHost != null &&
+                    ReferenceEquals(_sharedBimBridgeRepository, objectsRepository))
+                {
+                    initializationError = null;
+                    return _sharedBimBridgeHost;
+                }
+
+                try
+                {
+                    var newHost = new BimBridgeHost(
+                        pilotServiceProvider,
+                        objectsRepository,
+                        searchService,
+                        tabServiceProvider);
+                    var previousHost = _sharedBimBridgeHost;
+                    _sharedBimBridgeHost = newHost;
+                    _sharedBimBridgeRepository = objectsRepository;
+                    initializationError = null;
+                    previousHost?.Dispose();
+                    return newHost;
+                }
+                catch (Exception exception)
+                {
+                    initializationError = exception.Message;
+                    return null;
+                }
+            }
+        }
     }
 }

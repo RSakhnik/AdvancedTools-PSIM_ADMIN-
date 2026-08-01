@@ -1,0 +1,96 @@
+<Window x:Class="AdvancedTools.BimBridge.BimBridgeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="BIM Bridge Worker"
+        Width="820"
+        Height="650"
+        MinWidth="720"
+        MinHeight="560"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Padding="14" Background="#FFF3F6FA" CornerRadius="5">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="180"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="Состояние" FontWeight="SemiBold"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding State, Mode=OneWay}" FontWeight="Bold"/>
+                <TextBlock Grid.Row="1" Text="Worker Instance ID" Margin="0,6,0,0"/>
+                <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding WorkerInstanceId, Mode=OneWay}" IsReadOnly="True" BorderThickness="0" Background="Transparent" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="2" Text="Registration ID" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding RegistrationId, Mode=OneWay}" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="3" Text="Текущее задание" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding CurrentTaskId, Mode=OneWay}" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="4" Text="Операция" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding CurrentOperation, Mode=OneWay}" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="5" Text="Последний heartbeat" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding LastHeartbeat, Mode=OneWay}" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="6" Text="Capabilities" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding Capabilities, Mode=OneWay}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="7" Text="Последняя ошибка" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding LastError, Mode=OneWay}" TextWrapping="Wrap" Foreground="#FF9B1C1C" Margin="0,6,0,0"/>
+            </Grid>
+        </Border>
+
+        <StackPanel Grid.Row="1" Margin="0,14,0,0">
+            <TextBlock Text="Прогресс" FontWeight="SemiBold"/>
+            <Grid Margin="0,6,0,0">
+                <ProgressBar Height="22" Minimum="0" Maximum="100" Value="{Binding ProgressPercent, Mode=OneWay}"/>
+                <TextBlock Text="{Binding ProgressPercent, Mode=OneWay, StringFormat={}{0}%}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+        </StackPanel>
+
+        <GroupBox Grid.Row="2" Header="Настройки" Margin="0,14,0,0" Padding="10">
+            <StackPanel Orientation="Horizontal">
+                <CheckBox Content="Автоматическая регистрация" IsChecked="{Binding Settings.AutoRegister}" Margin="0,0,18,0"/>
+                <CheckBox Content="Автозапуск" IsChecked="{Binding Settings.AutoStart}" Margin="0,0,18,0"/>
+                <CheckBox Content="Reconnect" IsChecked="{Binding Settings.ReconnectEnabled}" Margin="0,0,18,0"/>
+                <CheckBox Content="Диагностические операции" IsChecked="{Binding Settings.DiagnosticOperationsEnabled}"/>
+                <Button Content="Сохранить" Command="{Binding SaveSettingsCommand}" Margin="18,0,0,0" Padding="12,3"/>
+            </StackPanel>
+        </GroupBox>
+
+        <GroupBox Grid.Row="3" Header="Доступные BIM-модели" Margin="0,14,0,0" Padding="8">
+            <ListBox ItemsSource="{Binding Models, Mode=OneWay}"/>
+        </GroupBox>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button Content="Регистрация" Command="{Binding RegisterCommand}" Padding="14,6" Margin="0,0,8,0"/>
+            <Button Content="Запустить" Command="{Binding StartCommand}" Padding="14,6" Margin="0,0,8,0"/>
+            <Button Content="Остановить" Command="{Binding StopCommand}" Padding="14,6" Margin="0,0,8,0"/>
+            <Button Content="Отменить регистрацию" Command="{Binding UnregisterCommand}" Padding="14,6" Margin="0,0,8,0"/>
+            <Button Content="Обновить" Command="{Binding RefreshCommand}" Padding="14,6" Margin="0,0,8,0"/>
+            <Button Content="Копировать диагностику" Command="{Binding CopyDiagnosticsCommand}" Padding="14,6"/>
+        </StackPanel>
+
+        <Border x:Name="InitializationOverlay" Grid.RowSpan="5" Panel.ZIndex="10"
+                Background="White" BorderBrush="#FFD9E1EA" BorderThickness="1" CornerRadius="5">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="420">
+                <TextBlock Text="BIM Bridge" FontSize="22" FontWeight="SemiBold"
+                           HorizontalAlignment="Center" Margin="0,0,0,18"/>
+                <TextBlock x:Name="InitializationText" Text="Инициализация BIM Bridge…"
+                           TextAlignment="Center" TextWrapping="Wrap" Margin="0,0,0,14"/>
+                <ProgressBar x:Name="InitializationProgress" Height="5" IsIndeterminate="True"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
