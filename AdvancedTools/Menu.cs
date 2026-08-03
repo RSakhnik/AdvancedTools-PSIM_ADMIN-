@@ -31,6 +31,8 @@ namespace AdvancedTools
         private readonly IObjectsRepository _objectsRepository;
         private readonly ISearchService _searchService;
         private readonly ITabServiceProvider _tabServiceProvider;
+        [Import(AllowDefault = true)]
+        private IFileProvider _fileProvider;
         private BimBridgeHost _bimBridgeHost;
         private string _bimBridgeInitializationError;
 
@@ -195,6 +197,7 @@ namespace AdvancedTools
                 _objectsRepository,
                 _searchService,
                 _tabServiceProvider,
+                _fileProvider,
                 out _bimBridgeInitializationError);
         }
 
@@ -203,6 +206,7 @@ namespace AdvancedTools
             IObjectsRepository objectsRepository,
             ISearchService searchService,
             ITabServiceProvider tabServiceProvider,
+            IFileProvider fileProvider,
             out string initializationError)
         {
             lock (BimBridgeHostGate)
@@ -220,7 +224,8 @@ namespace AdvancedTools
                         pilotServiceProvider,
                         objectsRepository,
                         searchService,
-                        tabServiceProvider);
+                        tabServiceProvider,
+                        fileProvider);
                     var previousHost = _sharedBimBridgeHost;
                     _sharedBimBridgeHost = newHost;
                     _sharedBimBridgeRepository = objectsRepository;

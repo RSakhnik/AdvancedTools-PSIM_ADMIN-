@@ -140,6 +140,7 @@ namespace AdvancedTools.BimBridge
         public string LogLevel { get; set; } = "Info";
         public string ResultsDirectory { get; set; } =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PilotBimBridge", "Results");
+        public FileOperationsSettings FileOperations { get; set; } = new FileOperationsSettings();
 
         public static string SettingsPath =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PilotBimBridge", "settings.json");
@@ -149,8 +150,10 @@ namespace AdvancedTools.BimBridge
             try
             {
                 if (!File.Exists(SettingsPath)) return new BimBridgeSettings();
-                return JsonConvert.DeserializeObject<BimBridgeSettings>(File.ReadAllText(SettingsPath, Encoding.UTF8))
-                       ?? new BimBridgeSettings();
+                var settings = JsonConvert.DeserializeObject<BimBridgeSettings>(File.ReadAllText(SettingsPath, Encoding.UTF8))
+                               ?? new BimBridgeSettings();
+                settings.FileOperations = settings.FileOperations ?? new FileOperationsSettings();
+                return settings;
             }
             catch
             {
@@ -164,6 +167,18 @@ namespace AdvancedTools.BimBridge
             if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
             File.WriteAllText(SettingsPath, JsonConvert.SerializeObject(this, Formatting.Indented), Encoding.UTF8);
         }
+    }
+
+    public sealed class FileOperationsSettings
+    {
+        public string TemporaryDirectory { get; set; } = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PilotBimBridge", "Files");
+        public long MaxSourceFileSizeBytes { get; set; } = 256L * 1024 * 1024;
+        public long MaxExcelResultBytes { get; set; } = 256L * 1024 * 1024;
+        public int MaxExcelSheets { get; set; } = 100;
+        public int MaxExcelRowsPerSheet { get; set; } = 100000;
+        public long MaxExcelCells { get; set; } = 1000000;
+        public bool DeleteTemporaryFiles { get; set; } = true;
     }
 
     public interface IBimBridgeLog

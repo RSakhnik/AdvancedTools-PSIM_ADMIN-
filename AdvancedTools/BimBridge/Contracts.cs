@@ -63,6 +63,21 @@ namespace Pilot.BimBridge.Contracts
         public const string PayloadTooLarge = "PAYLOAD_TOO_LARGE";
         public const string ResultTooLarge = "RESULT_TOO_LARGE";
         public const string TooManyUploads = "TOO_MANY_UPLOADS";
+        public const string ResultExpired = "RESULT_EXPIRED";
+        public const string FileReferenceInvalid = "FILE_REFERENCE_INVALID";
+        public const string FileReferenceAmbiguous = "FILE_REFERENCE_AMBIGUOUS";
+        public const string FileNotFound = "FILE_NOT_FOUND";
+        public const string FileVersionNotFound = "FILE_VERSION_NOT_FOUND";
+        public const string FileMountFailed = "FILE_MOUNT_FAILED";
+        public const string FileUnmountFailed = "FILE_UNMOUNT_FAILED";
+        public const string FileReadFailed = "FILE_READ_FAILED";
+        public const string FileCopyFailed = "FILE_COPY_FAILED";
+        public const string FileTooLarge = "FILE_TOO_LARGE";
+        public const string UnsupportedFileType = "UNSUPPORTED_FILE_TYPE";
+        public const string ExcelOpenFailed = "EXCEL_OPEN_FAILED";
+        public const string ExcelSheetNotFound = "EXCEL_SHEET_NOT_FOUND";
+        public const string ExcelContentLimitExceeded = "EXCEL_CONTENT_LIMIT_EXCEEDED";
+        public const string TempFileIoError = "TEMP_FILE_IO_ERROR";
         public const string InternalError = "INTERNAL_ERROR";
     }
 
@@ -349,6 +364,10 @@ namespace Pilot.BimBridge.Contracts
         public int TotalChunks { get; set; }
         [ProtoMember(8)]
         public string Sha256 { get; set; }
+        [ProtoMember(9)]
+        public string FileName { get; set; }
+        [ProtoMember(10)]
+        public string ResultKind { get; set; }
     }
 
     [ProtoContract]
@@ -479,6 +498,12 @@ namespace Pilot.BimBridge.Contracts
         public string Sha256 { get; set; }
         [ProtoMember(8)]
         public DateTime CreatedAtUtc { get; set; }
+        [ProtoMember(9)]
+        public string FileName { get; set; }
+        [ProtoMember(10)]
+        public string ResultKind { get; set; }
+        [ProtoMember(11)]
+        public DateTime? ExpiresAtUtc { get; set; }
     }
 
     [ProtoContract]

@@ -38,6 +38,7 @@
     </Compile>
     <Compile Include="BimBridge\Contracts.cs" />
     <Compile Include="BimBridge\Core.cs" />
+    <Compile Include="BimBridge\FileOperations.cs" />
     <Compile Include="BimBridge\ModelCatalog.cs" />
     <Compile Include="BimBridge\Operations.cs" />
     <Compile Include="BimBridge\Transport.cs" />

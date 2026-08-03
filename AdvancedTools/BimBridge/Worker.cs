@@ -14,6 +14,8 @@ namespace AdvancedTools.BimBridge
     public sealed class PreparedResult : IDisposable
     {
         public string Path { get; set; }
+        public string FileName { get; set; }
+        public string ResultKind { get; set; } = "json";
         public string ContentType { get; set; }
         public string ContentEncoding { get; set; }
         public long Length { get; set; }
@@ -76,6 +78,8 @@ namespace AdvancedTools.BimBridge
             return new PreparedResult
             {
                 Path = finalPath,
+                FileName = taskId.ToString("D") + ".json",
+                ResultKind = "json",
                 ContentType = "application/json",
                 ContentEncoding = encoding,
                 Length = new FileInfo(finalPath).Length,
@@ -140,6 +144,8 @@ namespace AdvancedTools.BimBridge
                 TotalLength = result.Length,
                 TotalChunks = totalChunks,
                 Sha256 = result.Sha256
+                ,FileName = result.FileName
+                ,ResultKind = result.ResultKind
             }).ConfigureAwait(false);
             BimBridgeException.ThrowIfError(begin);
             if (begin.ChunkSizeBytes != chunkSize)
@@ -457,7 +463,7 @@ namespace AdvancedTools.BimBridge
                         ReportProgress = (percent, message) => State.Update(s => s.With(progressPercent: percent))
                     }).ConfigureAwait(false);
                     source.Token.ThrowIfCancellationRequested();
-                    using (var result = await _resultWriter.WriteAsync(assignment.TaskId, resultObject, source.Token)
+                    using (var result = resultObject as PreparedResult ?? await _resultWriter.WriteAsync(assignment.TaskId, resultObject, source.Token)
                                .ConfigureAwait(false))
                     {
                         await EnsureLeaseAsync(assignment, source.Token).ConfigureAwait(false);

@@ -18,6 +18,7 @@ namespace AdvancedTools.BimBridge
         private readonly IObjectsRepository _objectsRepository;
         private readonly ISearchService _pilotSearchService;
         private readonly ITabServiceProvider _tabServiceProvider;
+        private readonly IFileProvider _fileProvider;
         private readonly IBimBridgeLog _log;
         private BimBridgeSettings _settings;
         private ModelContextProvider _models;
@@ -32,12 +33,14 @@ namespace AdvancedTools.BimBridge
             IPilotServiceProvider serviceProvider,
             IObjectsRepository objectsRepository,
             ISearchService pilotSearchService,
-            ITabServiceProvider tabServiceProvider)
+            ITabServiceProvider tabServiceProvider,
+            IFileProvider fileProvider = null)
         {
             _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
             _objectsRepository = objectsRepository ?? throw new ArgumentNullException(nameof(objectsRepository));
             _pilotSearchService = pilotSearchService;
             _tabServiceProvider = tabServiceProvider;
+            _fileProvider = fileProvider;
             _log = new FileBimBridgeLog();
         }
 
@@ -88,6 +91,9 @@ namespace AdvancedTools.BimBridge
                 var modelManager = _serviceProvider.GetServices<IModelManager>().FirstOrDefault();
                 var storageProvider = _serviceProvider.GetServices<IModelStorageProvider>().FirstOrDefault();
                 var searchManager = _serviceProvider.GetServices<IModelSearchManager>().FirstOrDefault();
+                var fileProvider = _fileProvider ?? _serviceProvider.GetServices<IFileProvider>().FirstOrDefault();
+                if (fileProvider == null)
+                    _log.Warn("IFileProvider is unavailable; Pilot file operations will not be registered.");
                 _models = new ModelContextProvider(
                     _objectsRepository,
                     _pilotSearchService,
@@ -103,6 +109,8 @@ namespace AdvancedTools.BimBridge
                     new ModelContextOperationHandler(_models),
                     new SearchElementsOperationHandler(_models, searchManager),
                     new LoadElementPropertiesOperationHandler(_models),
+                    new DownloadPilotFileOperationHandler(new PilotFileOperations(_objectsRepository, fileProvider, _settings, _log)),
+                    new ReadExcelContentOperationHandler(new PilotFileOperations(_objectsRepository, fileProvider, _settings, _log)),
                     new DiagnosticOperationHandler(_settings.DiagnosticOperationsEnabled)
                 };
                 var operationDispatcher = new BimOperationDispatcher(handlers);

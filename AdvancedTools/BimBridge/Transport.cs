@@ -27,8 +27,6 @@ namespace AdvancedTools.BimBridge
 
     public sealed class PilotSessionCustomApiProvider
     {
-        private const int SupportedMajor = 26;
-        private const int SupportedMinor = 11;
         private static readonly string[] SessionGraphFields =
         {
             "_repository",
@@ -60,8 +58,6 @@ namespace AdvancedTools.BimBridge
                     throw Unsupported("Ascon.Pilot.Transport is not loaded in the current Pilot session.");
 
                 var version = transportAssembly.GetName().Version;
-                if (version == null || version.Major != SupportedMajor || version.Minor != SupportedMinor)
-                    throw Unsupported($"Pilot transport {version} is not supported; expected {SupportedMajor}.{SupportedMinor}.x.");
 
                 var pilotClient = FindPilotClient(_objectsRepository);
                 var callback = new NoOpCallback();
