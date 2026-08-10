@@ -108,8 +108,8 @@ namespace AdvancedTools.BimBridge
                 var handlers = new List<IBimOperationHandler>
                 {
                     new ModelContextOperationHandler(_models),
-                    new SearchElementsOperationHandler(_models, searchManager),
-                    new LoadElementPropertiesOperationHandler(_models),
+                    new SearchElementsOperationHandler(_models, searchManager, _settings),
+                    new LoadElementPropertiesOperationHandler(_models, _settings),
                     new DownloadPilotFileOperationHandler(new PilotFileOperations(_objectsRepository, fileProvider, _settings, _log)),
                     new ReadExcelContentOperationHandler(new PilotFileOperations(_objectsRepository, fileProvider, _settings, _log)),
                     new DiagnosticOperationHandler(_settings.DiagnosticOperationsEnabled)

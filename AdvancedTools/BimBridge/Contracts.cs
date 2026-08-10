@@ -78,6 +78,7 @@ namespace Pilot.BimBridge.Contracts
         public const string ExcelSheetNotFound = "EXCEL_SHEET_NOT_FOUND";
         public const string ExcelContentLimitExceeded = "EXCEL_CONTENT_LIMIT_EXCEEDED";
         public const string TempFileIoError = "TEMP_FILE_IO_ERROR";
+        public const string ResourceLimit = "RESOURCE_LIMIT";
         public const string InternalError = "INTERNAL_ERROR";
     }
 

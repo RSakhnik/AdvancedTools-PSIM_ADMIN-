@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
@@ -130,6 +131,61 @@ namespace AdvancedTools.BimBridge
         }
     }
 
+    /// <summary>
+    /// Collapses a burst of notifications into a single callback.  The callback
+    /// is executed on a ThreadPool thread and is never allowed to overlap itself.
+    /// </summary>
+    public sealed class CoalescingSignal : IDisposable
+    {
+        private readonly Action _callback;
+        private readonly int _delayMilliseconds;
+        private readonly Timer _timer;
+        private int _pending;
+        private int _running;
+        private int _disposed;
+
+        public CoalescingSignal(TimeSpan delay, Action callback)
+        {
+            if (callback == null) throw new ArgumentNullException(nameof(callback));
+            if (delay < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(delay));
+            _callback = callback;
+            _delayMilliseconds = Math.Max(1, (int)Math.Min(int.MaxValue, delay.TotalMilliseconds));
+            _timer = new Timer(OnTimer, null, Timeout.Infinite, Timeout.Infinite);
+        }
+
+        public void Request()
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            if (Interlocked.Exchange(ref _pending, 1) == 0)
+                _timer.Change(_delayMilliseconds, Timeout.Infinite);
+        }
+
+        private void OnTimer(object state)
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            if (Interlocked.CompareExchange(ref _running, 1, 0) != 0) return;
+            try
+            {
+                Interlocked.Exchange(ref _pending, 0);
+                try { _callback(); }
+                catch { }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _running, 0);
+                if (Volatile.Read(ref _disposed) == 0 && Volatile.Read(ref _pending) != 0)
+                    _timer.Change(_delayMilliseconds, Timeout.Infinite);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            Interlocked.Exchange(ref _pending, 0);
+            _timer.Dispose();
+        }
+    }
+
     public sealed class BimBridgeSettings
     {
         public const string DefaultLoadedProjectName = "Графитек - АКВА";
@@ -144,6 +200,7 @@ namespace AdvancedTools.BimBridge
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PilotBimBridge", "Results");
         public string LoadedProjectNames { get; set; } = DefaultLoadedProjectName;
         public FileOperationsSettings FileOperations { get; set; } = new FileOperationsSettings();
+        public ResourceLimitSettings ResourceLimits { get; set; } = new ResourceLimitSettings();
 
         public static string SettingsPath =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PilotBimBridge", "settings.json");
@@ -156,6 +213,7 @@ namespace AdvancedTools.BimBridge
                 var settings = JsonConvert.DeserializeObject<BimBridgeSettings>(File.ReadAllText(SettingsPath, Encoding.UTF8))
                                ?? new BimBridgeSettings();
                 settings.FileOperations = settings.FileOperations ?? new FileOperationsSettings();
+                settings.ResourceLimits = settings.ResourceLimits ?? new ResourceLimitSettings();
                 settings.Normalize();
                 return settings;
             }
@@ -188,7 +246,92 @@ namespace AdvancedTools.BimBridge
         {
             if (string.IsNullOrWhiteSpace(LoadedProjectNames))
                 LoadedProjectNames = DefaultLoadedProjectName;
+            FileOperations = FileOperations ?? new FileOperationsSettings();
+            ResourceLimits = ResourceLimits ?? new ResourceLimitSettings();
+            ResourceLimits.Normalize();
         }
+    }
+
+    public sealed class ResourceLimitSettings
+    {
+        public int MinimumFreeDiskSpaceGb { get; set; } = 100;
+        public int CacheCreationThresholdGb { get; set; } = 120;
+        public int CacheResumeThresholdGb { get; set; } = 125;
+        public int MinimumAvailableMemoryGb { get; set; } = 8;
+        public int MaxCachedModelSearchServices { get; set; } = 4;
+        public int MaxCachedPartSearchServices { get; set; } = 8;
+        public int MaxSearchResults { get; set; } = 25000;
+        public int MaxPropertyElements { get; set; } = 10000;
+
+        internal void Normalize()
+        {
+            MinimumFreeDiskSpaceGb = Math.Max(10, MinimumFreeDiskSpaceGb);
+            CacheCreationThresholdGb = Math.Max(MinimumFreeDiskSpaceGb + 5, CacheCreationThresholdGb);
+            CacheResumeThresholdGb = Math.Max(CacheCreationThresholdGb + 1, CacheResumeThresholdGb);
+            MinimumAvailableMemoryGb = Math.Max(1, MinimumAvailableMemoryGb);
+            MaxCachedModelSearchServices = Math.Max(1, Math.Min(32, MaxCachedModelSearchServices));
+            MaxCachedPartSearchServices = Math.Max(1, Math.Min(64, MaxCachedPartSearchServices));
+            MaxSearchResults = Math.Max(100, Math.Min(100000, MaxSearchResults));
+            MaxPropertyElements = Math.Max(100, Math.Min(100000, MaxPropertyElements));
+        }
+    }
+
+    public sealed class BimBridgeResourceSnapshot
+    {
+        public long FreeDiskBytes { get; set; }
+        public long AvailableMemoryBytes { get; set; }
+        public long ProcessPrivateBytes { get; set; }
+        public bool IsDiskKnown { get; set; }
+        public bool IsMemoryKnown { get; set; }
+    }
+
+    public static class BimBridgeResourceMonitor
+    {
+        public static BimBridgeResourceSnapshot Capture()
+        {
+            var result = new BimBridgeResourceSnapshot();
+            try
+            {
+                var root = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+                var drive = new DriveInfo(root);
+                result.FreeDiskBytes = drive.AvailableFreeSpace;
+                result.IsDiskKnown = true;
+            }
+            catch { }
+
+            try
+            {
+                var status = new MemoryStatusEx();
+                if (GlobalMemoryStatusEx(status))
+                {
+                    result.AvailableMemoryBytes = checked((long)status.AvailablePhysical);
+                    result.IsMemoryKnown = true;
+                }
+            }
+            catch { }
+
+            try { result.ProcessPrivateBytes = Process.GetCurrentProcess().PrivateMemorySize64; }
+            catch { }
+            return result;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private sealed class MemoryStatusEx
+        {
+            public uint Length = (uint)Marshal.SizeOf(typeof(MemoryStatusEx));
+            public uint MemoryLoad;
+            public ulong TotalPhysical;
+            public ulong AvailablePhysical;
+            public ulong TotalPageFile;
+            public ulong AvailablePageFile;
+            public ulong TotalVirtual;
+            public ulong AvailableVirtual;
+            public ulong AvailableExtendedVirtual;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx([In, Out] MemoryStatusEx buffer);
     }
 
     public sealed class FileOperationsSettings

@@ -216,6 +216,7 @@ namespace AdvancedTools.BimBridge
         private CancellationTokenSource _runSource;
         private CancellationTokenSource _assignmentSource;
         private Task _loopTask;
+        private int _lastReportedProgress = -1;
         private bool _disposed;
 
         public BimBridgeWorkerController(
@@ -243,8 +244,11 @@ namespace AdvancedTools.BimBridge
         }
 
         public BimBridgeStateStore State { get; }
+        public event EventHandler CatalogDisplayChanged;
 
         public string[] GetModelDisplayItems() => _models.GetDisplayItems();
+        public string GetResourceStatus() => _models.GetResourceStatus();
+        public CatalogProgressSnapshot GetCatalogProgress() => _models.GetCatalogProgress();
 
         public async Task RegisterAsync()
         {
@@ -360,6 +364,7 @@ namespace AdvancedTools.BimBridge
             State.Update(s => s.With(
                 modelKeys: _models.GetModelKeys(),
                 capabilities: _dispatcher.Capabilities));
+            CatalogDisplayChanged?.Invoke(this, EventArgs.Empty);
         }
 
         public string GetDiagnostics()
@@ -374,6 +379,7 @@ namespace AdvancedTools.BimBridge
                 $"Progress: {s.ProgressPercent}%{Environment.NewLine}" +
                 $"LastHeartbeatUtc: {s.LastHeartbeatUtc:O}{Environment.NewLine}" +
                 $"LastError: {s.LastErrorCode} {s.LastError}{Environment.NewLine}" +
+                $"Resources: {_models.GetResourceStatus()}{Environment.NewLine}" +
                 $"Capabilities: {string.Join(", ", s.Capabilities)}{Environment.NewLine}" +
                 $"Models: {string.Join(", ", s.ModelKeys)}{Environment.NewLine}{Environment.NewLine}" +
                 _log.GetDiagnosticTail(100);
@@ -453,6 +459,7 @@ namespace AdvancedTools.BimBridge
                     currentTaskId: assignment.TaskId,
                     currentOperation: assignment.OperationCode,
                     progressPercent: 0));
+                Interlocked.Exchange(ref _lastReportedProgress, 0);
                 var heartbeatTask = HeartbeatLoopAsync(assignment, source, x => heartbeatFailure = x);
                 try
                 {
@@ -460,7 +467,7 @@ namespace AdvancedTools.BimBridge
                     {
                         Assignment = assignment,
                         CancellationToken = source.Token,
-                        ReportProgress = (percent, message) => State.Update(s => s.With(progressPercent: percent))
+                        ReportProgress = ReportTaskProgress
                     }).ConfigureAwait(false);
                     source.Token.ThrowIfCancellationRequested();
                     using (var result = resultObject as PreparedResult ?? await _resultWriter.WriteAsync(assignment.TaskId, resultObject, source.Token)
@@ -468,13 +475,14 @@ namespace AdvancedTools.BimBridge
                     {
                         await EnsureLeaseAsync(assignment, source.Token).ConfigureAwait(false);
                         State.Update(s => s.With(state: BimBridgeClientStates.Uploading, progressPercent: 0));
+                        Interlocked.Exchange(ref _lastReportedProgress, 0);
                         var uploader = new ResultUploader(_client);
                         await uploader.UploadAndCompleteAsync(
                             registration.RegistrationId,
                             assignment,
                             result,
                             registration.ResultChunkSizeBytes,
-                            (percent, message) => State.Update(s => s.With(progressPercent: percent)),
+                            ReportTaskProgress,
                             source.Token).ConfigureAwait(false);
                     }
                     _log.Info($"Task completed: {assignment.TaskId}, operation={assignment.OperationCode}");
@@ -636,6 +644,13 @@ namespace AdvancedTools.BimBridge
                 lastErrorCode: exception.Code,
                 lastError: exception.Message,
                 isRunning: false));
+        }
+
+        private void ReportTaskProgress(int percent, string message)
+        {
+            percent = Math.Max(0, Math.Min(100, percent));
+            if (Interlocked.Exchange(ref _lastReportedProgress, percent) == percent) return;
+            State.Update(s => s.With(progressPercent: percent));
         }
 
         private void ThrowIfDisposed()

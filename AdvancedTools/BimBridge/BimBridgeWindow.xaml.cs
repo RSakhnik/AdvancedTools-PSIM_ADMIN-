@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
 
 namespace AdvancedTools.BimBridge
 {
@@ -21,17 +23,26 @@ namespace AdvancedTools.BimBridge
         public void ShowInitialization(string message)
         {
             InitializationText.Text = message;
-            InitializationText.Foreground = System.Windows.Media.Brushes.Black;
+            InitializationText.Foreground = new SolidColorBrush(Color.FromRgb(82, 100, 119));
             InitializationProgress.Visibility = Visibility.Visible;
             InitializationOverlay.Visibility = Visibility.Visible;
         }
 
         public void ShowInitializationError(string message)
         {
-            InitializationText.Text = "Ошибка инициализации BIM Bridge:\n\n" + message;
-            InitializationText.Foreground = System.Windows.Media.Brushes.Firebrick;
+            InitializationText.Text = "Не удалось инициализировать BIM Bridge:\n\n" + message;
+            InitializationText.Foreground = Brushes.Firebrick;
             InitializationProgress.Visibility = Visibility.Collapsed;
             InitializationOverlay.Visibility = Visibility.Visible;
+        }
+
+        private void ProjectNameTextBox_OnKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Enter) return;
+            var viewModel = DataContext as BimBridgeViewModel;
+            if (viewModel?.AddProjectCommand.CanExecute(null) != true) return;
+            viewModel.AddProjectCommand.Execute(null);
+            e.Handled = true;
         }
 
         protected override void OnClosing(CancelEventArgs e)

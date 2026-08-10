@@ -106,7 +106,7 @@ namespace AdvancedTools.BimBridge
         public async Task<object> ExecuteAsync(TaskExecutionContext context)
         {
             context.CancellationToken.ThrowIfCancellationRequested();
-            var models = await _models.GetModelsAsync().ConfigureAwait(false);
+            var models = await _models.GetModelsAsync(context.CancellationToken).ConfigureAwait(false);
             return new
             {
                 GeneratedAtUtc = DateTime.UtcNow,
@@ -145,11 +145,21 @@ namespace AdvancedTools.BimBridge
     {
         private readonly ModelContextProvider _models;
         private readonly IModelSearchManager _searchManager;
+        private readonly BimBridgeSettings _settings;
 
         public SearchElementsOperationHandler(ModelContextProvider models, IModelSearchManager searchManager)
+            : this(models, searchManager, new BimBridgeSettings())
+        {
+        }
+
+        public SearchElementsOperationHandler(
+            ModelContextProvider models,
+            IModelSearchManager searchManager,
+            BimBridgeSettings settings)
         {
             _models = models;
             _searchManager = searchManager;
+            _settings = settings ?? new BimBridgeSettings();
         }
 
         public IReadOnlyCollection<string> OperationCodes { get; } = new[] { "search-elements" };
@@ -167,7 +177,9 @@ namespace AdvancedTools.BimBridge
                 context.CancellationToken).ConfigureAwait(false);
             if (request.Conditions == null || request.Conditions.Count == 0)
                 throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, "At least one search condition is required.");
-            var max = request.MaxResults <= 0 ? 10000 : Math.Min(request.MaxResults, 100000);
+            var max = request.MaxResults <= 0
+                ? Math.Min(10000, _settings.ResourceLimits.MaxSearchResults)
+                : Math.Min(request.MaxResults, _settings.ResourceLimits.MaxSearchResults);
             context.ReportProgress?.Invoke(10, "Подготовка поиска");
 
             var state = BuildSearchState(request);
@@ -288,7 +300,14 @@ namespace AdvancedTools.BimBridge
     public sealed class LoadElementPropertiesOperationHandler : IBimOperationHandler, IModelKeyResolverHandler
     {
         private readonly ModelContextProvider _models;
-        public LoadElementPropertiesOperationHandler(ModelContextProvider models) { _models = models; }
+        private readonly BimBridgeSettings _settings;
+        public LoadElementPropertiesOperationHandler(ModelContextProvider models)
+            : this(models, new BimBridgeSettings()) { }
+        public LoadElementPropertiesOperationHandler(ModelContextProvider models, BimBridgeSettings settings)
+        {
+            _models = models;
+            _settings = settings ?? new BimBridgeSettings();
+        }
         public IReadOnlyCollection<string> OperationCodes { get; } = new[] { "load-element-properties" };
         public string Capability => "load-element-properties";
         public bool IsAvailable => _models.HasModelServices;
@@ -301,6 +320,13 @@ namespace AdvancedTools.BimBridge
                 : request.TargetModelKey;
             if (request.ElementIds == null || request.ElementIds.Count == 0)
                 throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, "ElementIds is required.");
+            if (request.ElementIds.Count > _settings.ResourceLimits.MaxPropertyElements)
+                throw new BimBridgeException(
+                    BimBridgeErrorCodes.PayloadTooLarge,
+                    string.Format(
+                        "ElementIds contains {0} items; the configured limit is {1}.",
+                        request.ElementIds.Count,
+                        _settings.ResourceLimits.MaxPropertyElements));
             var batchSize = request.BatchSize <= 0 ? 100 : Math.Min(request.BatchSize, 1000);
             var model = await _models.GetModelAsync(
                 request.TargetModelKey,
