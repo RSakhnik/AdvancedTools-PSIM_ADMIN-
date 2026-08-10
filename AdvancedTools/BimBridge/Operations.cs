@@ -111,6 +111,7 @@ namespace AdvancedTools.BimBridge
             {
                 GeneratedAtUtc = DateTime.UtcNow,
                 ActiveModelKey = models.FirstOrDefault(x => x.IsActive)?.ModelKey,
+                Projects = _models.GetProjects(),
                 Models = models
             };
         }

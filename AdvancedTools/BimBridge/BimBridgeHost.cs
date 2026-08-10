@@ -101,6 +101,7 @@ namespace AdvancedTools.BimBridge
                     storageProvider,
                     searchManager,
                     _tabServiceProvider,
+                    _settings,
                     _log);
 
                 _window.ShowInitialization("Подготовка обработчиков заданий…");

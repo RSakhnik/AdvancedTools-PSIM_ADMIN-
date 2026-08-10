@@ -132,6 +132,8 @@ namespace AdvancedTools.BimBridge
 
     public sealed class BimBridgeSettings
     {
+        public const string DefaultLoadedProjectName = "Графитек - АКВА";
+
         public bool AutoStart { get; set; }
         public bool AutoRegister { get; set; } = true;
         public bool ReconnectEnabled { get; set; } = true;
@@ -140,6 +142,7 @@ namespace AdvancedTools.BimBridge
         public string LogLevel { get; set; } = "Info";
         public string ResultsDirectory { get; set; } =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PilotBimBridge", "Results");
+        public string LoadedProjectNames { get; set; } = DefaultLoadedProjectName;
         public FileOperationsSettings FileOperations { get; set; } = new FileOperationsSettings();
 
         public static string SettingsPath =>
@@ -153,6 +156,7 @@ namespace AdvancedTools.BimBridge
                 var settings = JsonConvert.DeserializeObject<BimBridgeSettings>(File.ReadAllText(SettingsPath, Encoding.UTF8))
                                ?? new BimBridgeSettings();
                 settings.FileOperations = settings.FileOperations ?? new FileOperationsSettings();
+                settings.Normalize();
                 return settings;
             }
             catch
@@ -163,9 +167,27 @@ namespace AdvancedTools.BimBridge
 
         public void Save()
         {
+            Normalize();
             var directory = Path.GetDirectoryName(SettingsPath);
             if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
             File.WriteAllText(SettingsPath, JsonConvert.SerializeObject(this, Formatting.Indented), Encoding.UTF8);
+        }
+
+        public string[] GetLoadedProjectNames()
+        {
+            Normalize();
+            return LoadedProjectNames
+                .Split(new[] { ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => x.Length > 0)
+                .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                .ToArray();
+        }
+
+        private void Normalize()
+        {
+            if (string.IsNullOrWhiteSpace(LoadedProjectNames))
+                LoadedProjectNames = DefaultLoadedProjectName;
         }
     }
 

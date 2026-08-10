@@ -24,6 +24,13 @@ namespace AdvancedTools.BimBridge
         public bool IsLoaded { get; set; }
     }
 
+    public sealed class ProjectDescriptor
+    {
+        public Guid ProjectId { get; set; }
+        public string DisplayName { get; set; }
+        public string ParentId { get; set; }
+    }
+
     public sealed class ModelDescriptor
     {
         public Guid ModelId { get; set; }
@@ -38,6 +45,8 @@ namespace AdvancedTools.BimBridge
         public bool IsLoaded { get; set; }
         public bool IsStorageReady { get; set; }
         public bool IsSearchReady { get; set; }
+        public string StorageState { get; set; }
+        public string SearchState { get; set; }
         public string LastServiceError { get; set; }
         public Guid[] ModelPartIds { get; set; }
         public ModelPartDescriptor[] ModelParts { get; set; }
@@ -66,9 +75,12 @@ namespace AdvancedTools.BimBridge
     public sealed class ModelContextProvider : IDisposable
     {
         private const int SubscribeChunkSize = 200;
+        private const int WarmupParallelism = 4;
         private static readonly TimeSpan SubscribeTimeout = TimeSpan.FromSeconds(20);
         private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(60);
-        private static readonly TimeSpan StorageLoadTimeout = TimeSpan.FromSeconds(5);
+        // A cold storage can download its index for longer than five seconds.
+        private static readonly TimeSpan StorageLoadTimeout = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan SearchServiceLoadTimeout = TimeSpan.FromSeconds(30);
 
         private readonly object _gate = new object();
         private readonly IObjectsRepository _objectsRepository;
@@ -77,17 +89,22 @@ namespace AdvancedTools.BimBridge
         private readonly IModelStorageProvider _storageProvider;
         private readonly IModelSearchManager _searchManager;
         private readonly ITabServiceProvider _tabServiceProvider;
+        private readonly BimBridgeSettings _settings;
         private readonly IBimBridgeLog _log;
         private readonly Dispatcher _uiDispatcher;
         private readonly SemaphoreSlim _refreshGate = new SemaphoreSlim(1, 1);
         private readonly SemaphoreSlim _warmupGate = new SemaphoreSlim(1, 1);
         private readonly CancellationTokenSource _lifetime = new CancellationTokenSource();
         private readonly Dictionary<Guid, CatalogModel> _models = new Dictionary<Guid, CatalogModel>();
+        private readonly Dictionary<Guid, CatalogProject> _projects = new Dictionary<Guid, CatalogProject>();
+        private readonly HashSet<Guid> _warmupAttempted = new HashSet<Guid>();
         private readonly Dictionary<Guid, Guid> _partToModel = new Dictionary<Guid, Guid>();
         private readonly Dictionary<Guid, IModelSearchService> _modelSearchServices =
             new Dictionary<Guid, IModelSearchService>();
         private readonly Dictionary<string, IModelSearchService> _partSearchServices =
             new Dictionary<string, IModelSearchService>(StringComparer.Ordinal);
+        private string _loadedProjectFilterKey = "";
+        private int _warmupGeneration;
         private Task _backgroundTask;
         private bool _disposed;
 
@@ -98,6 +115,7 @@ namespace AdvancedTools.BimBridge
             IModelStorageProvider storageProvider,
             IModelSearchManager searchManager,
             ITabServiceProvider tabServiceProvider,
+            BimBridgeSettings settings,
             IBimBridgeLog log)
         {
             _objectsRepository = objectsRepository;
@@ -106,6 +124,7 @@ namespace AdvancedTools.BimBridge
             _storageProvider = storageProvider;
             _searchManager = searchManager;
             _tabServiceProvider = tabServiceProvider;
+            _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _log = log;
             _uiDispatcher = Dispatcher.CurrentDispatcher;
 
@@ -134,6 +153,22 @@ namespace AdvancedTools.BimBridge
                     .Select(x => x.ToString("D"))
                     .OrderBy(x => x, StringComparer.Ordinal)
                     .ToArray();
+            }
+        }
+
+        public IReadOnlyList<ProjectDescriptor> GetProjects()
+        {
+            lock (_gate)
+            {
+                return _projects.Values
+                    .OrderBy(x => x.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+                    .ThenBy(x => x.ProjectId)
+                    .Select(x => new ProjectDescriptor
+                    {
+                        ProjectId = x.ProjectId,
+                        DisplayName = x.DisplayName,
+                        ParentId = x.ParentId == Guid.Empty ? null : x.ParentId.ToString("D")
+                    }).ToArray();
             }
         }
 
@@ -180,9 +215,19 @@ namespace AdvancedTools.BimBridge
                 try
                 {
                     var modelIds = await FindCoordinationModelIdsAsync(linked.Token).ConfigureAwait(false);
-                    var roots = await Task.Run(
+                    var searchRoots = await Task.Run(
                         () => LoadSnapshots(modelIds, linked.Token),
                         linked.Token).ConfigureAwait(false);
+                    // In Pilot 26.13 GetRootObject can explicitly be unsupported.
+                    // Search roots are sufficient, so that optional source must not
+                    // invalidate the complete catalog refresh.
+                    var root = await TryGetRootSnapshotAsync().ConfigureAwait(false);
+                    var roots = searchRoots
+                        .Concat(root == null ? Enumerable.Empty<PilotObjectSnapshot>() : new[] { root })
+                        .Where(x => x != null && x.Id != Guid.Empty)
+                        .GroupBy(x => x.Id)
+                        .Select(x => x.First())
+                        .ToArray();
                     var scan = await Task.Run(
                         () => ScanTree(roots, linked.Token),
                         linked.Token).ConfigureAwait(false);
@@ -201,7 +246,7 @@ namespace AdvancedTools.BimBridge
                         _log?.Warn(string.Format(
                             "No coordination models were found. Search IDs={0}, loaded model objects={1}, observed BIM types: {2}.",
                             modelIds.Length,
-                            roots.Count,
+                            roots.Length,
                             scan.ObservedTypes.Count == 0
                                 ? "<none>"
                                 : string.Join(", ", scan.ObservedTypes.OrderBy(x => x))));
@@ -248,6 +293,8 @@ namespace AdvancedTools.BimBridge
                         IsLoaded = storage?.IsLoaded == true,
                         IsStorageReady = string.Equals(entry.StorageState, ServiceStates.Ready, StringComparison.Ordinal),
                         IsSearchReady = string.Equals(entry.SearchState, ServiceStates.Ready, StringComparison.Ordinal),
+                        StorageState = entry.StorageState,
+                        SearchState = entry.SearchState,
                         LastServiceError = entry.LastServiceError,
                         ModelPartIds = entry.Parts.Keys.OrderBy(x => x).ToArray(),
                         ModelParts = entry.Parts.Values
@@ -316,33 +363,7 @@ namespace AdvancedTools.BimBridge
                 cancellationToken).ConfigureAwait(false);
             ValidateParts(access.ModelId, parts);
             if (parts.Length == 0)
-            {
-                lock (_gate)
-                {
-                    if (_modelSearchServices.TryGetValue(access.ModelId, out var cached))
-                        return cached;
-                    SetServiceStateLocked(access.ModelId, null, ServiceStates.Loading, null);
-                }
-                RaiseCatalogChanged();
-
-                try
-                {
-                    var service = await _searchManager.GetModelSearchServiceAsync(access.ModelId).ConfigureAwait(false);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    lock (_gate)
-                    {
-                        _modelSearchServices[access.ModelId] = service;
-                        SetServiceStateLocked(access.ModelId, null, ServiceStates.Ready, null);
-                    }
-                    RaiseCatalogChanged();
-                    return service;
-                }
-                catch (Exception exception)
-                {
-                    SetSearchError(access.ModelId, exception);
-                    throw ModelUnavailable(access.ModelId, "Unable to initialize model search.", exception);
-                }
-            }
+                return await GetWholeModelSearchServiceAsync(access.ModelId, cancellationToken).ConfigureAwait(false);
 
             var key = string.Join(";", parts.Select(x => x.ToString("D")));
             lock (_gate)
@@ -353,8 +374,14 @@ namespace AdvancedTools.BimBridge
 
             try
             {
-                var service = await _searchManager.GetModelPartsSearchServiceAsync(parts).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
+                var serviceTask = await OnUiAsync(
+                    () => _searchManager.GetModelPartsSearchServiceAsync(parts)).ConfigureAwait(false);
+                var service = await AwaitSdkTaskAsync(
+                    serviceTask,
+                    SearchServiceLoadTimeout,
+                    cancellationToken,
+                    "Model-part search service did not become ready in time.").ConfigureAwait(false);
+                if (service == null) throw new InvalidOperationException("IModelSearchManager returned null.");
                 lock (_gate) _partSearchServices[key] = service;
                 return service;
             }
@@ -581,6 +608,25 @@ namespace AdvancedTools.BimBridge
             return result;
         }
 
+        private async Task<PilotObjectSnapshot> TryGetRootSnapshotAsync()
+        {
+            try
+            {
+                return await OnUiAsync(() =>
+                    CopySnapshot(_objectsRepository?.GetRootObject())).ConfigureAwait(false);
+            }
+            catch (NotSupportedException exception)
+            {
+                _log?.Warn("Pilot root-object traversal is unavailable; BIM catalog will use search roots. " + exception.Message);
+                return null;
+            }
+            catch (Exception exception)
+            {
+                _log?.Warn("Pilot root-object traversal failed; BIM catalog will use search roots. " + exception.Message);
+                return null;
+            }
+        }
+
         private void EnrichModelPaths(
             CatalogScan scan,
             IEnumerable<PilotObjectSnapshot> roots,
@@ -793,13 +839,7 @@ namespace AdvancedTools.BimBridge
                 storage = await OnUiAsync(() => _storageProvider?.GetStorage(modelId)).ConfigureAwait(false);
                 if (storage == null) throw new InvalidOperationException("IModelStorageProvider returned null.");
 
-                var deadline = DateTime.UtcNow.Add(StorageLoadTimeout);
-                while (!storage.IsLoaded && DateTime.UtcNow < deadline)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    await Task.Delay(200, cancellationToken).ConfigureAwait(false);
-                }
-                if (!storage.IsLoaded) throw new TimeoutException("Model storage did not become ready in time.");
+                await WaitForStorageAsync(storage, cancellationToken).ConfigureAwait(false);
 
                 await MergeStoragePartsAsync(modelId, storage, cancellationToken).ConfigureAwait(false);
                 lock (_gate) SetServiceStateLocked(modelId, ServiceStates.Ready, null, null);
@@ -807,6 +847,19 @@ namespace AdvancedTools.BimBridge
                 return storage;
             }
             catch (OperationCanceledException) { throw; }
+            catch (TimeoutException exception)
+            {
+                // GetStorage does not force a closed Pilot model to be loaded.  A
+                // storage that stays cold is therefore an available on-demand
+                // resource, not a broken service.  Keep the task retryable so it
+                // can succeed after the model is opened or loaded by Pilot.
+                lock (_gate) SetServiceStateLocked(modelId, ServiceStates.OnDemand, null, null);
+                RaiseCatalogChanged();
+                throw ModelUnavailable(
+                    modelId,
+                    "Model storage is not loaded yet. Open the model in Pilot-BIM and retry the request.",
+                    exception);
+            }
             catch (Exception exception)
             {
                 lock (_gate) SetServiceStateLocked(modelId, ServiceStates.Error, null, exception.Message);
@@ -817,6 +870,8 @@ namespace AdvancedTools.BimBridge
 
         private void StartWarmup()
         {
+            int generation;
+            lock (_gate) generation = _warmupGeneration;
             _ = Task.Run(async () =>
             {
                 if (!await _warmupGate.WaitAsync(0).ConfigureAwait(false)) return;
@@ -826,44 +881,249 @@ namespace AdvancedTools.BimBridge
                     lock (_gate)
                     {
                         modelIds = _models.Values
-                            .Where(x => x.Parts.Count > 0 &&
-                                !string.Equals(x.StorageState, ServiceStates.Error, StringComparison.Ordinal))
-                            .OrderByDescending(x => x.Parts.Count)
-                            .ThenBy(x => x.ModelId)
+                            .Where(x => _warmupAttempted.Add(x.ModelId))
+                            .OrderBy(x => x.ModelId)
                             .Select(x => x.ModelId)
-                            .Take(100)
                             .ToArray();
                     }
-                    foreach (var modelId in modelIds)
+                    if (modelIds.Length > 0)
+                        _log?.Info(string.Format(
+                            "BIM model service warm-up queued: {0} models, {1} concurrent model slots.",
+                            modelIds.Length,
+                            WarmupParallelism));
+                    var completed = 0;
+                    for (var start = 0; start < modelIds.Length; start += WarmupParallelism)
                     {
                         _lifetime.Token.ThrowIfCancellationRequested();
-                        try
+                        lock (_gate)
                         {
-                            var access = await GetModelAsync(modelId.ToString("D"), _lifetime.Token).ConfigureAwait(false);
-                            await GetSearchServiceAsync(access, null, _lifetime.Token).ConfigureAwait(false);
+                            if (generation != _warmupGeneration) break;
                         }
-                        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return; }
-                        catch (Exception exception)
-                        {
-                            _log?.Warn("BIM model warm-up failed for " + modelId.ToString("D") + ": " + exception.Message);
-                        }
+                        var batch = modelIds.Skip(start).Take(WarmupParallelism)
+                            .Select(modelId => WarmModelServicesAsync(modelId, _lifetime.Token)).ToArray();
+                        await Task.WhenAll(batch).ConfigureAwait(false);
+                        completed += batch.Length;
+                        if (completed == modelIds.Length || completed % 100 == 0)
+                            _log?.Info(string.Format(
+                                "BIM model service warm-up progress: {0}/{1} models.",
+                                completed,
+                                modelIds.Length));
                     }
                 }
                 finally
                 {
                     _warmupGate.Release();
+                    bool restart;
+                    lock (_gate)
+                    {
+                        restart = generation != _warmupGeneration;
+                    }
+                    if (restart) StartWarmup();
                 }
             });
         }
 
+        private async Task WarmModelServicesAsync(Guid modelId, CancellationToken cancellationToken)
+        {
+            Exception storageException = null;
+            Exception searchException = null;
+            // Both SDK services are independent.  Starting the two operations
+            // together prevents a cold storage from holding up model search for
+            // the same model and, consequently, the entire warm-up queue.
+            var storageTask = ProbeStorageAsync(modelId, cancellationToken);
+            var searchTask = GetWholeModelSearchServiceAsync(modelId, cancellationToken);
+            try
+            {
+                await storageTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                storageException = exception;
+            }
+
+            try
+            {
+                await searchTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                searchException = exception;
+            }
+
+            if (storageException != null || searchException != null)
+            {
+                lock (_gate) _warmupAttempted.Remove(modelId);
+                var details = string.Join(" | ", new[] { storageException, searchException }
+                    .Where(x => x != null)
+                    .Select(x => x.Message));
+                _log?.Warn("BIM model warm-up incomplete for " + modelId.ToString("D") + ": " + details);
+            }
+        }
+
+        private async Task ProbeStorageAsync(Guid modelId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                lock (_gate) SetServiceStateLocked(modelId, ServiceStates.Loading, null, null);
+                RaiseCatalogChanged();
+
+                var storage = await OnUiAsync(() => _storageProvider?.GetStorage(modelId)).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (storage == null)
+                {
+                    lock (_gate) SetServiceStateLocked(modelId, ServiceStates.OnDemand, null, null);
+                    RaiseCatalogChanged();
+                    return;
+                }
+
+                if (!storage.IsLoaded)
+                {
+                    // There is no public force-load method on IModelStorageProvider.
+                    // Do not occupy a warm-up slot for 30 seconds and do not report
+                    // a normal closed-model state as an SDK failure.
+                    lock (_gate) SetServiceStateLocked(modelId, ServiceStates.OnDemand, null, null);
+                    RaiseCatalogChanged();
+                    return;
+                }
+
+                await MergeStoragePartsAsync(modelId, storage, cancellationToken).ConfigureAwait(false);
+                lock (_gate) SetServiceStateLocked(modelId, ServiceStates.Ready, null, null);
+                RaiseCatalogChanged();
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception exception)
+            {
+                lock (_gate) SetServiceStateLocked(modelId, ServiceStates.Error, null, exception.Message);
+                RaiseCatalogChanged();
+                throw ModelUnavailable(modelId, "Unable to inspect model storage.", exception);
+            }
+        }
+
+        private async Task<IModelSearchService> GetWholeModelSearchServiceAsync(
+            Guid modelId,
+            CancellationToken cancellationToken)
+        {
+            if (_searchManager == null)
+                throw ModelUnavailable(modelId, "BIM search service is unavailable.");
+
+            lock (_gate)
+            {
+                if (_modelSearchServices.TryGetValue(modelId, out var cached)) return cached;
+                SetServiceStateLocked(modelId, null, ServiceStates.Loading, null);
+            }
+            RaiseCatalogChanged();
+
+            try
+            {
+                var serviceTask = await OnUiAsync(
+                    () => _searchManager.GetModelSearchServiceAsync(modelId)).ConfigureAwait(false);
+                var service = await AwaitSdkTaskAsync(
+                    serviceTask,
+                    SearchServiceLoadTimeout,
+                    cancellationToken,
+                    "Model search service did not become ready in time.").ConfigureAwait(false);
+                if (service == null) throw new InvalidOperationException("IModelSearchManager returned null.");
+                lock (_gate)
+                {
+                    _modelSearchServices[modelId] = service;
+                    SetServiceStateLocked(modelId, null, ServiceStates.Ready, null);
+                }
+                RaiseCatalogChanged();
+                return service;
+            }
+            catch (Exception exception)
+            {
+                SetSearchError(modelId, exception);
+                throw ModelUnavailable(modelId, "Unable to initialize model search.", exception);
+            }
+        }
+
+        private async Task WaitForStorageAsync(IModelStorage storage, CancellationToken cancellationToken)
+        {
+            if (storage.IsLoaded) return;
+
+            var loaded = new TaskCompletionSource<bool>();
+            EventHandler onLoaded = (sender, args) => loaded.TrySetResult(true);
+            storage.Loaded += onLoaded;
+            try
+            {
+                if (storage.IsLoaded) return;
+                var timeout = Task.Delay(StorageLoadTimeout, cancellationToken);
+                var completed = await Task.WhenAny(loaded.Task, timeout).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (completed != loaded.Task || !storage.IsLoaded)
+                    throw new TimeoutException("Model storage did not become ready in time.");
+            }
+            finally
+            {
+                storage.Loaded -= onLoaded;
+            }
+        }
+
+        private static async Task<T> AwaitSdkTaskAsync<T>(
+            Task<T> task,
+            TimeSpan timeout,
+            CancellationToken cancellationToken,
+            string timeoutMessage)
+        {
+            if (task == null) throw new InvalidOperationException("Pilot SDK returned a null task.");
+            var timeoutTask = Task.Delay(timeout, cancellationToken);
+            var completed = await Task.WhenAny(task, timeoutTask).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (completed != task) throw new TimeoutException(timeoutMessage);
+            return await task.ConfigureAwait(false);
+        }
+
         private void MergeScan(CatalogScan scan)
         {
+            var projectNames = new HashSet<string>(
+                _settings.GetLoadedProjectNames(),
+                StringComparer.CurrentCultureIgnoreCase);
+            var filterKey = string.Join("\u001f", projectNames.OrderBy(x => x, StringComparer.CurrentCultureIgnoreCase));
+            var selectedModels = scan.Models.Values
+                .Where(model => IsSelectedProject(model, projectNames))
+                .ToArray();
+            var selectedModelIds = new HashSet<Guid>(selectedModels.Select(x => x.ModelId));
+            var selectedProjectIds = new HashSet<Guid>(
+                selectedModels.Where(x => x.ProjectId != Guid.Empty).Select(x => x.ProjectId));
+
             lock (_gate)
             {
                 var oldModels = _models.ToDictionary(x => x.Key, x => x.Value);
+                if (!string.Equals(_loadedProjectFilterKey, filterKey, StringComparison.Ordinal))
+                {
+                    _loadedProjectFilterKey = filterKey;
+                    _warmupGeneration++;
+                    _warmupAttempted.Clear();
+                    _modelSearchServices.Clear();
+                    _partSearchServices.Clear();
+                }
+                else
+                {
+                    _warmupAttempted.IntersectWith(selectedModelIds);
+                    foreach (var model in oldModels.Values)
+                    {
+                        if (selectedModelIds.Contains(model.ModelId) &&
+                            (string.Equals(model.StorageState, ServiceStates.OnDemand, StringComparison.Ordinal) ||
+                             string.Equals(model.StorageState, ServiceStates.Error, StringComparison.Ordinal)))
+                            _warmupAttempted.Remove(model.ModelId);
+                    }
+                }
                 _models.Clear();
                 _partToModel.Clear();
-                foreach (var scanned in scan.Models.Values)
+                _projects.Clear();
+                foreach (var project in scan.Projects.Values.Where(x => selectedProjectIds.Contains(x.Id)))
+                    _projects[project.Id] = new CatalogProject(project.Id, project.ParentId, project.DisplayName);
+                foreach (var scanned in selectedModels)
                 {
                     if (oldModels.TryGetValue(scanned.ModelId, out var previous))
                     {
@@ -876,7 +1136,25 @@ namespace AdvancedTools.BimBridge
                         _partToModel[part.ModelPartId] = scanned.ModelId;
                 }
             }
+            _log?.Info(string.Format(
+                "BIM model project filter selected {0} of {1} models for: {2}.",
+                selectedModels.Length,
+                scan.Models.Count,
+                string.Join("; ", projectNames.OrderBy(x => x, StringComparer.CurrentCultureIgnoreCase))));
+            if (selectedModels.Length == 0)
+                _log?.Warn("No BIM models matched the configured project names. Check LoadedProjectNames in BIM Bridge settings.");
             RaiseCatalogChanged();
+        }
+
+        private static bool IsSelectedProject(CatalogModel model, HashSet<string> projectNames)
+        {
+            if (model == null || projectNames == null || projectNames.Count == 0) return false;
+            if (!string.IsNullOrWhiteSpace(model.ProjectName) && projectNames.Contains(model.ProjectName.Trim()))
+                return true;
+            return (model.ProjectPath ?? "")
+                .Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Any(projectNames.Contains);
         }
 
         private void AddResolvedModel(Guid modelId, string displayName, PilotObjectSnapshot part)
@@ -967,6 +1245,7 @@ namespace AdvancedTools.BimBridge
                     if (!_models.ContainsKey(args.Viewer.ModelId))
                         _models[args.Viewer.ModelId] =
                             new CatalogModel(args.Viewer.ModelId, "BIM " + args.Viewer.ModelId.ToString("D"));
+                    _warmupAttempted.Remove(args.Viewer.ModelId);
                 }
                 RaiseCatalogChanged();
             }
@@ -1096,6 +1375,7 @@ namespace AdvancedTools.BimBridge
 
         private static class ServiceStates
         {
+            public const string OnDemand = "on-demand";
             public const string Pending = "pending";
             public const string Loading = "loading";
             public const string Ready = "ready";
@@ -1136,6 +1416,20 @@ namespace AdvancedTools.BimBridge
             }
         }
 
+        private sealed class CatalogProject
+        {
+            public CatalogProject(Guid projectId, Guid parentId, string displayName)
+            {
+                ProjectId = projectId;
+                ParentId = parentId;
+                DisplayName = string.IsNullOrWhiteSpace(displayName) ? projectId.ToString("D") : displayName;
+            }
+
+            public Guid ProjectId { get; }
+            public Guid ParentId { get; }
+            public string DisplayName { get; }
+        }
+
         private sealed class CatalogPart
         {
             public CatalogPart(Guid modelPartId, string displayName, string typeName)
@@ -1152,6 +1446,7 @@ namespace AdvancedTools.BimBridge
         private sealed class CatalogScan
         {
             public Dictionary<Guid, CatalogModel> Models { get; } = new Dictionary<Guid, CatalogModel>();
+            public Dictionary<Guid, PilotObjectSnapshot> Projects { get; } = new Dictionary<Guid, PilotObjectSnapshot>();
             public Dictionary<Guid, Guid> PartToModel { get; } = new Dictionary<Guid, Guid>();
             public HashSet<string> ObservedTypes { get; } =
                 new HashSet<string>(StringComparer.Ordinal);
@@ -1160,6 +1455,7 @@ namespace AdvancedTools.BimBridge
             public void RegisterObject(PilotObjectSnapshot snapshot)
             {
                 ScannedObjects++;
+                if (snapshot.TypeIsProject) Projects[snapshot.Id] = snapshot;
                 if (!string.IsNullOrWhiteSpace(snapshot.TypeName) &&
                     snapshot.TypeName.IndexOf("bim", StringComparison.OrdinalIgnoreCase) >= 0)
                 {

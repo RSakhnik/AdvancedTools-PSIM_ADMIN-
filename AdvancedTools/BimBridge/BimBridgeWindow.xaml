@@ -60,12 +60,19 @@
         </StackPanel>
 
         <GroupBox Grid.Row="2" Header="Настройки" Margin="0,14,0,0" Padding="10">
-            <StackPanel Orientation="Horizontal">
+            <StackPanel>
+                <StackPanel Orientation="Horizontal">
                 <CheckBox Content="Автоматическая регистрация" IsChecked="{Binding Settings.AutoRegister}" Margin="0,0,18,0"/>
                 <CheckBox Content="Автозапуск" IsChecked="{Binding Settings.AutoStart}" Margin="0,0,18,0"/>
                 <CheckBox Content="Reconnect" IsChecked="{Binding Settings.ReconnectEnabled}" Margin="0,0,18,0"/>
                 <CheckBox Content="Диагностические операции" IsChecked="{Binding Settings.DiagnosticOperationsEnabled}"/>
                 <Button Content="Сохранить" Command="{Binding SaveSettingsCommand}" Margin="18,0,0,0" Padding="12,3"/>
+                </StackPanel>
+                <DockPanel Margin="0,10,0,0">
+                    <TextBlock Text="Загружать проекты:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBox Text="{Binding Settings.LoadedProjectNames, UpdateSourceTrigger=PropertyChanged}"
+                             ToolTip="Точные названия проектов через точку с запятой или с новой строки"/>
+                </DockPanel>
             </StackPanel>
         </GroupBox>
 

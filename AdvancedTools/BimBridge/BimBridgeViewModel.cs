@@ -24,7 +24,7 @@ namespace AdvancedTools.BimBridge
             StopCommand = new AsyncRelayCommand(_controller.StopAsync, () => IsRunning);
             UnregisterCommand = new AsyncRelayCommand(_controller.UnregisterAsync, () => IsRegistered);
             RefreshCommand = new AsyncRelayCommand(_controller.RefreshAsync, () => true);
-            SaveSettingsCommand = new RelayCommand(() => Settings.Save());
+            SaveSettingsCommand = new AsyncRelayCommand(SaveSettingsAsync, () => true);
             CopyDiagnosticsCommand = new RelayCommand(CopyDiagnostics);
             controller.State.SnapshotChanged += OnSnapshotChanged;
         }
@@ -78,6 +78,12 @@ namespace AdvancedTools.BimBridge
         {
             try { Clipboard.SetText(_controller.GetDiagnostics()); }
             catch { }
+        }
+
+        private async Task SaveSettingsAsync()
+        {
+            Settings.Save();
+            await _controller.RefreshAsync().ConfigureAwait(false);
         }
 
         private void OnPropertyChanged([CallerMemberName] string propertyName = null) =>
