@@ -9,7 +9,7 @@
         Background="#FFF4F6FA"
         FontFamily="Segoe UI"
         FontSize="13"
-        WindowStartupLocation="CenterOwner">
+        WindowStartupLocation="CenterScreen" ShowInTaskbar="True">
     <Window.Resources>
         <Style x:Key="Card" TargetType="Border">
             <Setter Property="Background" Value="White"/>
@@ -54,13 +54,24 @@
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
+
+        <ScrollViewer Grid.Row="0"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      HorizontalContentAlignment="Stretch"
+                      PanningMode="VerticalOnly"
+                      Padding="0,0,8,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="340"/>
+                </Grid.RowDefinitions>
 
         <Grid Grid.Row="0" Margin="2,0,2,14">
             <Grid.ColumnDefinitions>
@@ -116,7 +127,10 @@
                 <StackPanel Grid.Column="2">
                     <TextBlock Text="Ресурсы компьютера" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <Border Background="#FFF3F6FA" CornerRadius="6" Padding="12">
+                        <StackPanel>
                         <TextBlock Text="{Binding ResourceStatus}" TextWrapping="Wrap" Foreground="#FF34495E" LineHeight="20"/>
+                        <Button Content="Показать блокирующее окно" Command="{Binding ShowBlockingWindowCommand}" Style="{StaticResource SecondaryButton}" HorizontalAlignment="Left"/>
+                        </StackPanel>
                     </Border>
                     <TextBlock Text="Последняя ошибка" FontWeight="SemiBold" Margin="0,13,0,5"/>
                     <TextBlock Text="{Binding LastError}" Foreground="{Binding ErrorBrush}" TextWrapping="Wrap" MaxHeight="56" ToolTip="{Binding LastError}"/>
@@ -212,32 +226,16 @@
 
                     <Grid>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="62"/>
-                            <ColumnDefinition Width="24"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="62"/>
-                            <ColumnDefinition Width="24"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="52"/>
-                            <ColumnDefinition Width="24"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="52"/>
-                            <ColumnDefinition Width="8"/>
-                            <ColumnDefinition Width="52"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Резерв диска C, ГБ" VerticalAlignment="Center"/>
-                        <TextBox Grid.Column="1" Margin="8,0,0,0" Text="{Binding Settings.ResourceLimits.MinimumFreeDiskSpaceGb}"/>
-                        <TextBlock Grid.Column="3" Text="Остановить кэш при, ГБ" VerticalAlignment="Center"/>
-                        <TextBox Grid.Column="4" Margin="8,0,0,0" Text="{Binding Settings.ResourceLimits.CacheCreationThresholdGb}"/>
-                        <TextBlock Grid.Column="6" Text="Свободная RAM, ГБ" VerticalAlignment="Center"/>
-                        <TextBox Grid.Column="7" Margin="8,0,0,0" Text="{Binding Settings.ResourceLimits.MinimumAvailableMemoryGb}"/>
-                        <TextBlock Grid.Column="9" Text="Сервисы моделей/частей" VerticalAlignment="Center"/>
-                        <TextBox Grid.Column="10" Margin="8,0,0,0" Text="{Binding Settings.ResourceLimits.MaxCachedModelSearchServices}"/>
-                        <TextBox Grid.Column="12" Text="{Binding Settings.ResourceLimits.MaxCachedPartSearchServices}"/>
-                        <Button Grid.Column="14" Content="Сохранить и обновить" Command="{Binding SaveSettingsCommand}" Style="{StaticResource PrimaryButton}" Margin="18,0,0,0"/>
+                        <TextBlock Text="{Binding ResourceLimitsSummary}" Foreground="#FF66778C"
+                                   TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,18,0"/>
+                        <Button Grid.Column="1" Content="Ресурсы и кэш…" Command="{Binding OpenResourceLimitsCommand}"
+                                Style="{StaticResource SecondaryButton}" Margin="0,0,8,0"/>
+                        <Button Grid.Column="2" Content="Сохранить общие настройки" Command="{Binding SaveSettingsCommand}"
+                                Style="{StaticResource PrimaryButton}" Margin="0"/>
                     </Grid>
                 </StackPanel>
             </Border>
@@ -292,7 +290,10 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="5" Margin="0,14,0,0">
+            </Grid>
+        </ScrollViewer>
+
+        <Grid Grid.Row="1" Margin="0,14,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
@@ -308,7 +309,7 @@
             </StackPanel>
         </Grid>
 
-        <Border x:Name="InitializationOverlay" Grid.RowSpan="6" Panel.ZIndex="10"
+        <Border x:Name="InitializationOverlay" Grid.RowSpan="2" Panel.ZIndex="10"
                 Background="#F7FFFFFF" BorderBrush="#FFDCE3EC" BorderThickness="1" CornerRadius="8">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="460">
                 <TextBlock Text="BIM Bridge" FontSize="25" FontWeight="SemiBold" Foreground="#FF172638"

@@ -1,4 +1,5 @@
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Pilot.BimBridge.Contracts;
 using System;
 using System.Collections.Generic;
@@ -188,11 +189,20 @@ namespace AdvancedTools.BimBridge
 
     public sealed class BimBridgeSettings
     {
+        public const int CurrentSettingsSchemaVersion = 5;
         public const string DefaultLoadedProjectName = "Графитек - АКВА";
 
+        public int SettingsSchemaVersion { get; set; } = CurrentSettingsSchemaVersion;
         public bool AutoStart { get; set; }
         public bool AutoRegister { get; set; } = true;
         public bool ReconnectEnabled { get; set; } = true;
+        public int OperationTimeoutSeconds { get; set; } = 1200;
+        public int SdkDispatcherQueueTimeoutSeconds { get; set; } = 10;
+        public int SearchServiceInitializationTimeoutSeconds { get; set; } = 180;
+        public int SdkCleanupTimeoutSeconds { get; set; } = 15;
+        public int ResultTransferTimeoutSeconds { get; set; } = 30;
+        public int ResultFinalizeTimeoutSeconds { get; set; } = 60;
+        public int ResultTransferMaxAttempts { get; set; } = 3;
         public bool DeleteTemporaryResults { get; set; } = true;
         public bool DiagnosticOperationsEnabled { get; set; }
         public string LogLevel { get; set; } = "Info";
@@ -210,10 +220,13 @@ namespace AdvancedTools.BimBridge
             try
             {
                 if (!File.Exists(SettingsPath)) return new BimBridgeSettings();
-                var settings = JsonConvert.DeserializeObject<BimBridgeSettings>(File.ReadAllText(SettingsPath, Encoding.UTF8))
+                var json = File.ReadAllText(SettingsPath, Encoding.UTF8);
+                var sourceVersion = JObject.Parse(json).Value<int?>(nameof(SettingsSchemaVersion)) ?? 0;
+                var settings = JsonConvert.DeserializeObject<BimBridgeSettings>(json)
                                ?? new BimBridgeSettings();
                 settings.FileOperations = settings.FileOperations ?? new FileOperationsSettings();
                 settings.ResourceLimits = settings.ResourceLimits ?? new ResourceLimitSettings();
+                settings.Migrate(sourceVersion);
                 settings.Normalize();
                 return settings;
             }
@@ -225,6 +238,7 @@ namespace AdvancedTools.BimBridge
 
         public void Save()
         {
+            SettingsSchemaVersion = CurrentSettingsSchemaVersion;
             Normalize();
             var directory = Path.GetDirectoryName(SettingsPath);
             if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
@@ -244,11 +258,30 @@ namespace AdvancedTools.BimBridge
 
         private void Normalize()
         {
+            if (SdkDispatcherQueueTimeoutSeconds <= 0) SdkDispatcherQueueTimeoutSeconds = 10;
+            if (SearchServiceInitializationTimeoutSeconds <= 0) SearchServiceInitializationTimeoutSeconds = 180;
+            if (SdkCleanupTimeoutSeconds <= 0) SdkCleanupTimeoutSeconds = 15;
+            DeleteTemporaryResults = true;
             if (string.IsNullOrWhiteSpace(LoadedProjectNames))
                 LoadedProjectNames = DefaultLoadedProjectName;
             FileOperations = FileOperations ?? new FileOperationsSettings();
+            FileOperations.DeleteTemporaryFiles = true;
             ResourceLimits = ResourceLimits ?? new ResourceLimitSettings();
             ResourceLimits.Normalize();
+        }
+
+        private void Migrate(int sourceVersion)
+        {
+            if (sourceVersion < 2 && ResourceLimits.MinimumAvailableMemoryGb == 8)
+                ResourceLimits.MinimumAvailableMemoryGb = 4;
+            if (sourceVersion < 3)
+            {
+                DeleteTemporaryResults = true;
+                FileOperations.DeleteTemporaryFiles = true;
+                ResourceLimits.MaxCachedModelSearchServices = 0;
+                ResourceLimits.MaxCachedPartSearchServices = 0;
+            }
+            SettingsSchemaVersion = CurrentSettingsSchemaVersion;
         }
     }
 
@@ -257,22 +290,73 @@ namespace AdvancedTools.BimBridge
         public int MinimumFreeDiskSpaceGb { get; set; } = 100;
         public int CacheCreationThresholdGb { get; set; } = 120;
         public int CacheResumeThresholdGb { get; set; } = 125;
-        public int MinimumAvailableMemoryGb { get; set; } = 8;
-        public int MaxCachedModelSearchServices { get; set; } = 4;
-        public int MaxCachedPartSearchServices { get; set; } = 8;
+        public int MinimumAvailableMemoryGb { get; set; } = 4;
+        public int CriticalAvailableMemoryGb { get; set; } = 2;
+        public bool AllowExistingSearchIndexesBelowMemoryLimit { get; set; } = true;
+        // Retained only so older settings.json files remain readable. SDK services
+        // are task-scoped and are never cached between assignments.
+        public int MaxCachedModelSearchServices { get; set; }
+        public int MaxCachedPartSearchServices { get; set; }
         public int MaxSearchResults { get; set; } = 25000;
         public int MaxPropertyElements { get; set; } = 10000;
+        public int MaxSpatialTraversalNodes { get; set; } = 100000;
+        public long MaxSpatialResultBytes { get; set; } = 67108864;
+
+        public ResourceLimitSettings Clone()
+        {
+            return new ResourceLimitSettings
+            {
+                MinimumFreeDiskSpaceGb = MinimumFreeDiskSpaceGb,
+                CacheCreationThresholdGb = CacheCreationThresholdGb,
+                CacheResumeThresholdGb = CacheResumeThresholdGb,
+                MinimumAvailableMemoryGb = MinimumAvailableMemoryGb,
+                CriticalAvailableMemoryGb = CriticalAvailableMemoryGb,
+                AllowExistingSearchIndexesBelowMemoryLimit = AllowExistingSearchIndexesBelowMemoryLimit,
+                MaxCachedModelSearchServices = MaxCachedModelSearchServices,
+                MaxCachedPartSearchServices = MaxCachedPartSearchServices,
+                MaxSearchResults = MaxSearchResults,
+                MaxPropertyElements = MaxPropertyElements,
+                MaxSpatialTraversalNodes = MaxSpatialTraversalNodes,
+                MaxSpatialResultBytes = MaxSpatialResultBytes
+            };
+        }
+
+        public void CopyFrom(ResourceLimitSettings source)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            MinimumFreeDiskSpaceGb = source.MinimumFreeDiskSpaceGb;
+            CacheCreationThresholdGb = source.CacheCreationThresholdGb;
+            CacheResumeThresholdGb = source.CacheResumeThresholdGb;
+            MinimumAvailableMemoryGb = source.MinimumAvailableMemoryGb;
+            CriticalAvailableMemoryGb = source.CriticalAvailableMemoryGb;
+            AllowExistingSearchIndexesBelowMemoryLimit = source.AllowExistingSearchIndexesBelowMemoryLimit;
+            MaxCachedModelSearchServices = source.MaxCachedModelSearchServices;
+            MaxCachedPartSearchServices = source.MaxCachedPartSearchServices;
+            MaxSearchResults = source.MaxSearchResults;
+            MaxPropertyElements = source.MaxPropertyElements;
+            MaxSpatialTraversalNodes = source.MaxSpatialTraversalNodes;
+            MaxSpatialResultBytes = source.MaxSpatialResultBytes;
+            Normalize();
+        }
+
+        public void ResetRecommended()
+        {
+            CopyFrom(new ResourceLimitSettings());
+        }
 
         internal void Normalize()
         {
             MinimumFreeDiskSpaceGb = Math.Max(10, MinimumFreeDiskSpaceGb);
             CacheCreationThresholdGb = Math.Max(MinimumFreeDiskSpaceGb + 5, CacheCreationThresholdGb);
             CacheResumeThresholdGb = Math.Max(CacheCreationThresholdGb + 1, CacheResumeThresholdGb);
-            MinimumAvailableMemoryGb = Math.Max(1, MinimumAvailableMemoryGb);
-            MaxCachedModelSearchServices = Math.Max(1, Math.Min(32, MaxCachedModelSearchServices));
-            MaxCachedPartSearchServices = Math.Max(1, Math.Min(64, MaxCachedPartSearchServices));
+            CriticalAvailableMemoryGb = Math.Max(1, CriticalAvailableMemoryGb);
+            MinimumAvailableMemoryGb = Math.Max(CriticalAvailableMemoryGb + 1, MinimumAvailableMemoryGb);
+            MaxCachedModelSearchServices = 0;
+            MaxCachedPartSearchServices = 0;
             MaxSearchResults = Math.Max(100, Math.Min(100000, MaxSearchResults));
             MaxPropertyElements = Math.Max(100, Math.Min(100000, MaxPropertyElements));
+            MaxSpatialTraversalNodes = Math.Max(1, Math.Min(1000000, MaxSpatialTraversalNodes));
+            MaxSpatialResultBytes = Math.Max(1048576L, Math.Min(268435456L, MaxSpatialResultBytes));
         }
     }
 
@@ -285,9 +369,204 @@ namespace AdvancedTools.BimBridge
         public bool IsMemoryKnown { get; set; }
     }
 
-    public static class BimBridgeResourceMonitor
+    public interface IBimBridgeResourceMonitor
     {
-        public static BimBridgeResourceSnapshot Capture()
+        BimBridgeResourceSnapshot Capture();
+    }
+
+    public enum SearchResourceRequestKind
+    {
+        ExistingIndex,
+        NewIndex
+    }
+
+    public sealed class ResourcePolicyDecision
+    {
+        public ResourcePolicyDecision(bool isAllowed, bool existingIndexesOnly, string reason)
+        {
+            IsAllowed = isAllowed;
+            ExistingIndexesOnly = existingIndexesOnly;
+            Reason = reason ?? string.Empty;
+        }
+
+        public bool IsAllowed { get; }
+        public bool ExistingIndexesOnly { get; }
+        public string Reason { get; }
+    }
+
+    public sealed class AdaptiveResourcePolicy
+    {
+        private readonly object _gate = new object();
+        private bool _newIndexPressure;
+
+        public ResourcePolicyDecision Evaluate(
+            BimBridgeResourceSnapshot usage,
+            ResourceLimitSettings limits,
+            SearchResourceRequestKind requestKind)
+        {
+            usage = usage ?? new BimBridgeResourceSnapshot();
+            limits = limits ?? new ResourceLimitSettings();
+            limits.Normalize();
+
+            var freeDiskGb = ToGigabytes(usage.FreeDiskBytes);
+            var availableMemoryGb = ToGigabytes(usage.AvailableMemoryBytes);
+            lock (_gate)
+            {
+                if (!usage.IsDiskKnown)
+                {
+                    _newIndexPressure = true;
+                    return Block("Free disk space is unknown; the protected disk reserve cannot be guaranteed.");
+                }
+                if (freeDiskGb < limits.MinimumFreeDiskSpaceGb)
+                {
+                    _newIndexPressure = true;
+                    return Block(string.Format(
+                        "Free disk is {0:0.0} GB; at least {1} GB must remain free.",
+                        freeDiskGb,
+                        limits.MinimumFreeDiskSpaceGb));
+                }
+                if (usage.IsMemoryKnown && availableMemoryGb < limits.CriticalAvailableMemoryGb)
+                {
+                    _newIndexPressure = true;
+                    return Block(string.Format(
+                        "Available RAM is {0:0.0} GB; the critical reserve is {1} GB.",
+                        availableMemoryGb,
+                        limits.CriticalAvailableMemoryGb));
+                }
+
+                if (requestKind == SearchResourceRequestKind.ExistingIndex &&
+                    limits.AllowExistingSearchIndexesBelowMemoryLimit)
+                {
+                    var existingOnly =
+                        freeDiskGb < limits.CacheCreationThresholdGb ||
+                        (usage.IsMemoryKnown && availableMemoryGb < limits.MinimumAvailableMemoryGb) ||
+                        _newIndexPressure;
+                    return new ResourcePolicyDecision(
+                        true,
+                        existingOnly,
+                        existingOnly
+                            ? "Only existing BIM search indexes are allowed by the current resource reserve."
+                            : "Resources are sufficient for an existing BIM search index.");
+                }
+
+                var requiredDiskGb = _newIndexPressure
+                    ? limits.CacheResumeThresholdGb
+                    : limits.CacheCreationThresholdGb;
+                var requiredMemoryGb = _newIndexPressure
+                    ? limits.MinimumAvailableMemoryGb + 1
+                    : limits.MinimumAvailableMemoryGb;
+                var diskBlocked = freeDiskGb < requiredDiskGb;
+                var memoryBlocked = usage.IsMemoryKnown && availableMemoryGb < requiredMemoryGb;
+                if (diskBlocked || memoryBlocked)
+                {
+                    _newIndexPressure = true;
+                    return Block(string.Format(
+                        "A new BIM search index requires at least {0} GB free disk and {1} GB available RAM; current values are {2:0.0} GB and {3}.",
+                        requiredDiskGb,
+                        requiredMemoryGb,
+                        freeDiskGb,
+                        usage.IsMemoryKnown ? availableMemoryGb.ToString("0.0") + " GB" : "unknown"));
+                }
+
+                _newIndexPressure = false;
+                return new ResourcePolicyDecision(true, false, "Resources are sufficient for a new BIM search index.");
+            }
+        }
+
+        public bool IsNewIndexPressureActive
+        {
+            get { lock (_gate) return _newIndexPressure; }
+        }
+
+        private ResourcePolicyDecision Block(string reason) =>
+            new ResourcePolicyDecision(false, true, reason);
+
+        private static double ToGigabytes(long bytes) => bytes / (double)(1024L * 1024 * 1024);
+    }
+
+    public sealed class SearchIndexInventorySnapshot
+    {
+        private readonly HashSet<Guid> _indexIds;
+
+        public SearchIndexInventorySnapshot(IEnumerable<Guid> indexIds, long totalLengthBytes, DateTime capturedAtUtc)
+        {
+            _indexIds = new HashSet<Guid>(indexIds ?? Enumerable.Empty<Guid>());
+            TotalLengthBytes = Math.Max(0, totalLengthBytes);
+            CapturedAtUtc = capturedAtUtc;
+        }
+
+        public long TotalLengthBytes { get; }
+        public DateTime CapturedAtUtc { get; }
+        public int Count => _indexIds.Count;
+        public bool Contains(Guid id) => id != Guid.Empty && _indexIds.Contains(id);
+        public bool ContainsAll(IEnumerable<Guid> ids)
+        {
+            var values = (ids ?? Enumerable.Empty<Guid>()).Where(x => x != Guid.Empty).Distinct().ToArray();
+            return values.Length > 0 && values.All(_indexIds.Contains);
+        }
+    }
+
+    public interface ISearchIndexInventory
+    {
+        SearchIndexInventorySnapshot Capture(bool forceRefresh = false);
+    }
+
+    public sealed class FileSystemSearchIndexInventory : ISearchIndexInventory
+    {
+        private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(30);
+        private readonly object _gate = new object();
+        private readonly string _root;
+        private SearchIndexInventorySnapshot _cached;
+
+        public FileSystemSearchIndexInventory(string root = null)
+        {
+            _root = string.IsNullOrWhiteSpace(root)
+                ? Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "ASCON", "Pilot-BIM", "Pilot-BIM-Viewer", "Temp", "SearchIndexes")
+                : root;
+        }
+
+        public SearchIndexInventorySnapshot Capture(bool forceRefresh = false)
+        {
+            lock (_gate)
+            {
+                if (!forceRefresh && _cached != null &&
+                    DateTime.UtcNow - _cached.CapturedAtUtc < RefreshInterval)
+                    return _cached;
+            }
+
+            var ids = new HashSet<Guid>();
+            long total = 0;
+            try
+            {
+                if (Directory.Exists(_root))
+                {
+                    foreach (var path in Directory.EnumerateFiles(_root, "*.indexbm2", SearchOption.AllDirectories))
+                    {
+                        try
+                        {
+                            var file = new FileInfo(path);
+                            if (file.Length <= 0) continue;
+                            total += file.Length;
+                            Guid id;
+                            if (Guid.TryParse(Path.GetFileNameWithoutExtension(file.Name), out id)) ids.Add(id);
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            var snapshot = new SearchIndexInventorySnapshot(ids, total, DateTime.UtcNow);
+            lock (_gate) _cached = snapshot;
+            return snapshot;
+        }
+    }
+
+    public sealed class SystemBimBridgeResourceMonitor : IBimBridgeResourceMonitor
+    {
+        public BimBridgeResourceSnapshot Capture()
         {
             var result = new BimBridgeResourceSnapshot();
             try
@@ -334,6 +613,12 @@ namespace AdvancedTools.BimBridge
         private static extern bool GlobalMemoryStatusEx([In, Out] MemoryStatusEx buffer);
     }
 
+    public static class BimBridgeResourceMonitor
+    {
+        private static readonly IBimBridgeResourceMonitor SystemMonitor = new SystemBimBridgeResourceMonitor();
+        public static BimBridgeResourceSnapshot Capture() => SystemMonitor.Capture();
+    }
+
     public sealed class FileOperationsSettings
     {
         public string TemporaryDirectory { get; set; } = Path.Combine(
@@ -356,9 +641,22 @@ namespace AdvancedTools.BimBridge
 
     public sealed class FileBimBridgeLog : IBimBridgeLog
     {
+        private const long MaximumTotalBytes = 256L * 1024 * 1024;
+        private const int RetentionDays = 14;
         private readonly object _gate = new object();
         private readonly string _directory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PilotBimBridge", "Logs");
+        private DateTime _lastCleanupUtc = DateTime.MinValue;
+
+        public FileBimBridgeLog()
+        {
+            try
+            {
+                Directory.CreateDirectory(_directory);
+                lock (_gate) CleanupCore();
+            }
+            catch { }
+        }
 
         public void Info(string message) => Write("INFO", message, null);
         public void Warn(string message) => Write("WARN", message, null);
@@ -370,6 +668,7 @@ namespace AdvancedTools.BimBridge
             {
                 Directory.CreateDirectory(_directory);
                 var safeMessage = (message ?? string.Empty).Replace("\r", " ").Replace("\n", " ");
+                if (safeMessage.Length > 8192) safeMessage = safeMessage.Substring(0, 8192) + "…";
                 var line = $"{DateTime.UtcNow:O} [{level}] {safeMessage}";
                 if (exception != null)
                 {
@@ -385,7 +684,10 @@ namespace AdvancedTools.BimBridge
                     }
                 }
                 lock (_gate)
+                {
                     File.AppendAllText(Path.Combine(_directory, DateTime.UtcNow.ToString("yyyy-MM-dd") + ".log"), line + Environment.NewLine, Encoding.UTF8);
+                    if (DateTime.UtcNow - _lastCleanupUtc >= TimeSpan.FromHours(1)) CleanupCore();
+                }
             }
             catch
             {
@@ -399,13 +701,65 @@ namespace AdvancedTools.BimBridge
             {
                 var path = Path.Combine(_directory, DateTime.UtcNow.ToString("yyyy-MM-dd") + ".log");
                 if (!File.Exists(path)) return string.Empty;
-                var lines = File.ReadAllLines(path, Encoding.UTF8);
-                return string.Join(Environment.NewLine, lines.Skip(Math.Max(0, lines.Length - Math.Max(1, maxLines))));
+                var tail = new Queue<string>(Math.Max(1, maxLines));
+                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 81920, FileOptions.SequentialScan))
+                using (var reader = new StreamReader(stream, Encoding.UTF8, true, 81920))
+                {
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        if (tail.Count >= Math.Max(1, maxLines)) tail.Dequeue();
+                        tail.Enqueue(line);
+                    }
+                }
+                return string.Join(Environment.NewLine, tail);
             }
             catch
             {
                 return string.Empty;
             }
+        }
+
+        private void CleanupCore()
+        {
+            _lastCleanupUtc = DateTime.UtcNow;
+            FileInfo[] files;
+            try
+            {
+                files = new DirectoryInfo(_directory).GetFiles("*.log")
+                    .OrderBy(x => x.LastWriteTimeUtc)
+                    .ToArray();
+            }
+            catch { return; }
+
+            var cutoff = DateTime.UtcNow.AddDays(-RetentionDays);
+            foreach (var file in files.Where(x => x.LastWriteTimeUtc < cutoff))
+            {
+                try { file.Delete(); }
+                catch { }
+            }
+
+            try
+            {
+                files = new DirectoryInfo(_directory).GetFiles("*.log")
+                    .OrderBy(x => x.LastWriteTimeUtc)
+                    .ToArray();
+                var total = files.Sum(x => x.Length);
+                var today = DateTime.UtcNow.ToString("yyyy-MM-dd") + ".log";
+                foreach (var file in files)
+                {
+                    if (total <= MaximumTotalBytes) break;
+                    if (string.Equals(file.Name, today, StringComparison.OrdinalIgnoreCase)) continue;
+                    var length = file.Length;
+                    try
+                    {
+                        file.Delete();
+                        total -= length;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
         }
     }
 

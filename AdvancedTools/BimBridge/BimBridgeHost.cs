@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -25,9 +26,13 @@ namespace AdvancedTools.BimBridge
         private BimBridgeWorkerController _controller;
         private BimBridgeViewModel _viewModel;
         private BimBridgeWindow _window;
+        private WorkerTemporaryWorkspace _workspace;
         private bool _initializationStarted;
         private bool _exitSubscribed;
         private bool _disposed;
+        private readonly Dispatcher _pilotDispatcher;
+        private Thread _windowThread;
+        private readonly object _windowGate = new object();
 
         public BimBridgeHost(
             IPilotServiceProvider serviceProvider,
@@ -42,38 +47,48 @@ namespace AdvancedTools.BimBridge
             _tabServiceProvider = tabServiceProvider;
             _fileProvider = fileProvider;
             _log = new FileBimBridgeLog();
+            _pilotDispatcher = Dispatcher.CurrentDispatcher;
         }
 
         public void ShowWindow()
         {
             if (_disposed) return;
             _log.Info("BIM Bridge window requested.");
-            if (_window == null)
+            lock (_windowGate)
             {
-                _window = new BimBridgeWindow();
-                _log.Info("BIM Bridge window constructed.");
+                if (_windowThread == null)
+                {
+                    _windowThread = new Thread(() =>
+                    {
+                        try
+                        {
+                            _window = new BimBridgeWindow();
+                            _window.ShowInitialization("Инициализация BIM Bridge…");
+                            _window.Show();
+                            _pilotDispatcher.BeginInvoke(new Action(InitializeAfterWindowShown), DispatcherPriority.Background);
+                            Dispatcher.Run();
+                        }
+                        catch (Exception error) { _log.Error("Independent worker UI failed.", error); }
+                    }) { IsBackground = true, Name = "BIM Bridge UI" };
+                    _windowThread.SetApartmentState(ApartmentState.STA);
+                    _windowThread.Start();
+                    return;
+                }
             }
-
-            if (_window.IsVisible)
+            OnWindow(window =>
             {
-                if (_window.WindowState == WindowState.Minimized) _window.WindowState = WindowState.Normal;
-                _window.Activate();
-            }
-            else
-            {
-                _window.Show();
-                _window.Activate();
-            }
-            _log.Info("BIM Bridge window shown.");
-
+                if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
+                window.Show(); window.Activate();
+            });
             if (!_initializationStarted && _controller == null)
-            {
-                _window.ShowInitialization("Инициализация BIM Bridge…");
-                _window.Dispatcher.BeginInvoke(
-                    new Action(InitializeAfterWindowShown),
-                    DispatcherPriority.Background);
-                _log.Info("BIM Bridge initialization queued.");
-            }
+                _pilotDispatcher.BeginInvoke(new Action(InitializeAfterWindowShown), DispatcherPriority.Background);
+        }
+
+        private void OnWindow(Action<BimBridgeWindow> action)
+        {
+            var window = _window;
+            if (window != null && !window.Dispatcher.HasShutdownStarted)
+                window.Dispatcher.BeginInvoke(new Action(() => action(window)));
         }
 
         private void InitializeAfterWindowShown()
@@ -84,10 +99,11 @@ namespace AdvancedTools.BimBridge
             try
             {
                 _log.Info("BIM Bridge UI initialization started.");
-                _window.ShowInitialization("Загрузка настроек…");
+                OnWindow(window => window.ShowInitialization("Загрузка настроек…"));
                 _settings = BimBridgeSettings.Load();
+                _workspace = new WorkerTemporaryWorkspace(_settings, _log);
 
-                _window.ShowInitialization("Подключение BIM-сервисов…");
+                OnWindow(window => window.ShowInitialization("Подключение BIM-сервисов…"));
                 var modelManager = _serviceProvider.GetServices<IModelManager>().FirstOrDefault();
                 var storageProvider = _serviceProvider.GetServices<IModelStorageProvider>().FirstOrDefault();
                 var searchManager = _serviceProvider.GetServices<IModelSearchManager>().FirstOrDefault();
@@ -104,14 +120,24 @@ namespace AdvancedTools.BimBridge
                     _settings,
                     _log);
 
-                _window.ShowInitialization("Подготовка обработчиков заданий…");
+                OnWindow(window => window.ShowInitialization("Подготовка обработчиков заданий…"));
+                var resultWriter = new ResultFileWriter(_settings, _workspace);
+                var fileOperations = new PilotFileOperations(
+                    _objectsRepository,
+                    fileProvider,
+                    _settings,
+                    _log,
+                    _workspace);
                 var handlers = new List<IBimOperationHandler>
                 {
                     new ModelContextOperationHandler(_models),
-                    new SearchElementsOperationHandler(_models, searchManager, _settings),
-                    new LoadElementPropertiesOperationHandler(_models, _settings),
-                    new DownloadPilotFileOperationHandler(new PilotFileOperations(_objectsRepository, fileProvider, _settings, _log)),
-                    new ReadExcelContentOperationHandler(new PilotFileOperations(_objectsRepository, fileProvider, _settings, _log)),
+                    new SearchElementsOperationHandler(_models, searchManager, _settings, resultWriter),
+                    new LoadElementPropertiesOperationHandler(_models, _settings, resultWriter),
+                    new GetElementRelationsOperationHandler(_models, _settings, resultWriter),
+                    new GetElementSpatialDataOperationHandler(_models, _settings, resultWriter),
+                    new DiagnoseElementSpatialDataOperationHandler(_models, _settings, resultWriter),
+                    new DownloadPilotFileOperationHandler(fileOperations),
+                    new ReadExcelContentOperationHandler(fileOperations),
                     new DiagnosticOperationHandler(_settings.DiagnosticOperationsEnabled)
                 };
                 var operationDispatcher = new BimOperationDispatcher(handlers);
@@ -123,10 +149,15 @@ namespace AdvancedTools.BimBridge
                     _models,
                     _settings,
                     _log,
-                    personId);
+                    personId,
+                    resultWriter,
+                    _workspace);
 
-                _viewModel = new BimBridgeViewModel(_controller, _settings);
-                _window.SetViewModel(_viewModel);
+                OnWindow(window =>
+                {
+                    _viewModel = new BimBridgeViewModel(_controller, _settings, window.Dispatcher);
+                    window.SetViewModel(_viewModel);
+                });
                 SubscribeToApplicationExit();
                 _log.Info($"BIM Bridge UI initialized in {stopwatch.ElapsedMilliseconds} ms.");
 
@@ -136,12 +167,14 @@ namespace AdvancedTools.BimBridge
             catch (Exception exception)
             {
                 _log.Error("BIM Bridge UI initialization failed.", exception);
-                _window.ShowInitializationError(exception.Message);
+                OnWindow(window => window.ShowInitializationError(exception.Message));
                 _initializationStarted = false;
                 _controller?.Dispose();
                 _controller = null;
                 _models?.Dispose();
                 _models = null;
+                _workspace?.Dispose();
+                _workspace = null;
             }
         }
 
@@ -167,14 +200,20 @@ namespace AdvancedTools.BimBridge
             if (_exitSubscribed && Application.Current != null)
                 Application.Current.Exit -= OnApplicationExit;
             _exitSubscribed = false;
-            _viewModel?.Dispose();
-            if (_window != null)
+            OnWindow(window =>
             {
-                try { _window.ClosePermanently(); }
-                catch { }
-            }
+                _viewModel?.Dispose();
+                window.ClosePermanently();
+                window.Dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
+            });
             _controller?.Dispose();
-            _models?.Dispose();
+            _ = Task.Run(async () =>
+            {
+                if (_controller != null) await _controller.ShutdownCompletion.ConfigureAwait(false);
+                if (_models != null) await _models.GetPendingSdkCleanup().ConfigureAwait(false);
+                _ = _pilotDispatcher.BeginInvoke(new Action(() => _models?.Dispose()), DispatcherPriority.Background);
+                _workspace?.Dispose();
+            });
         }
     }
 }

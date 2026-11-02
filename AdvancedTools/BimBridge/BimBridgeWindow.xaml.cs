@@ -50,7 +50,8 @@ namespace AdvancedTools.BimBridge
             if (!_allowClose)
             {
                 e.Cancel = true;
-                Hide();
+                // Keep a taskbar entry: reopening must not require the blocked Pilot menu.
+                WindowState = WindowState.Minimized;
                 return;
             }
             base.OnClosing(e);

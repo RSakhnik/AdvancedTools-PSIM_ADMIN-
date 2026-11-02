@@ -18,6 +18,7 @@ namespace AdvancedTools.BimBridge
     {
         private readonly BimBridgeWorkerController _controller;
         private readonly Dispatcher _uiDispatcher;
+        private readonly DispatcherTimer _healthTimer;
         private readonly CoalescingSignal _snapshotSignal;
         private readonly CoalescingSignal _catalogSignal;
         private readonly CoalescingSignal _resourceSignal;
@@ -35,28 +36,33 @@ namespace AdvancedTools.BimBridge
         private int _catalogRefreshRequested;
         private int _resourceRefreshRunning;
         private bool _disposed;
+        private ResourceLimitsWindow _resourceWindow;
 
-        public BimBridgeViewModel(BimBridgeWorkerController controller, BimBridgeSettings settings)
+        public BimBridgeViewModel(BimBridgeWorkerController controller, BimBridgeSettings settings, Dispatcher dispatcher = null)
         {
             _controller = controller;
             Settings = settings;
             _snapshot = controller.State.Current;
             SelectedProjects = new ObservableCollection<string>(settings.GetLoadedProjectNames());
-            _uiDispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+            _uiDispatcher = dispatcher ?? Dispatcher.CurrentDispatcher;
             ReplaceModels(Array.Empty<string>());
             _snapshotSignal = new CoalescingSignal(TimeSpan.FromMilliseconds(75), QueueSnapshotToUi);
             _catalogSignal = new CoalescingSignal(TimeSpan.FromMilliseconds(250), ScheduleCatalogRefresh);
             _resourceSignal = new CoalescingSignal(TimeSpan.FromSeconds(1), ScheduleResourceRefresh);
+            _healthTimer = new DispatcherTimer(TimeSpan.FromSeconds(2), DispatcherPriority.Background,
+                (sender, args) => _resourceSignal.Request(), _uiDispatcher);
             RegisterCommand = new AsyncRelayCommand(_controller.RegisterAsync, () => !IsRegistered && !IsRunning);
             StartCommand = new AsyncRelayCommand(_controller.StartAsync, () => IsRegistered && !IsRunning);
             StopCommand = new AsyncRelayCommand(_controller.StopAsync, () => IsRunning);
             UnregisterCommand = new AsyncRelayCommand(_controller.UnregisterAsync, () => IsRegistered);
             RefreshCommand = new AsyncRelayCommand(_controller.RefreshAsync, () => true);
             SaveSettingsCommand = new AsyncRelayCommand(SaveSettingsAsync, () => true);
+            OpenResourceLimitsCommand = new RelayCommand(OpenResourceLimits);
             AddProjectCommand = new RelayCommand(AddProject, CanAddProject);
             RemoveProjectCommand = new ParameterRelayCommand(RemoveProject, CanRemoveProject);
             ApplyProjectsCommand = new AsyncRelayCommand(ApplyProjectSelectionAsync, () => SelectedProjects.Count > 0);
             CopyDiagnosticsCommand = new RelayCommand(CopyDiagnostics);
+            ShowBlockingWindowCommand = new RelayCommand(() => _controller.ShowBlockingWindow());
             controller.State.SnapshotChanged += OnSnapshotChanged;
             controller.CatalogDisplayChanged += OnCatalogDisplayChanged;
             _catalogSignal.Request();
@@ -73,6 +79,8 @@ namespace AdvancedTools.BimBridge
         public ICommand UnregisterCommand { get; }
         public ICommand RefreshCommand { get; }
         public ICommand SaveSettingsCommand { get; }
+        public ICommand OpenResourceLimitsCommand { get; }
+        public ICommand ShowBlockingWindowCommand { get; }
         public ICommand AddProjectCommand { get; }
         public ICommand RemoveProjectCommand { get; }
         public ICommand ApplyProjectsCommand { get; }
@@ -90,7 +98,8 @@ namespace AdvancedTools.BimBridge
                     case BimBridgeClientStates.Waiting: return "Ожидает задания";
                     case BimBridgeClientStates.Executing: return "Выполняет задание";
                     case BimBridgeClientStates.Uploading: return "Отправляет результат";
-                    case BimBridgeClientStates.Reconnecting: return "Переподключение";
+                    case BimBridgeClientStates.Reconnecting: return _snapshot.LastErrorCode == "SDK_RECOVERY_PENDING"
+                        ? "Ожидает освобождения SDK" : "Переподключение";
                     case BimBridgeClientStates.Error: return "Ошибка";
                     case BimBridgeClientStates.Unsupported: return "Несовместимая версия";
                     default: return "Остановлен";
@@ -144,6 +153,12 @@ namespace AdvancedTools.BimBridge
         public Brush ErrorBrush => string.IsNullOrWhiteSpace(_snapshot.LastError) ? Brushes.SeaGreen : Brushes.IndianRed;
         public string Capabilities => string.Join(", ", _snapshot.Capabilities.Select(LocalizeCapability));
         public string ResourceStatus => _resourceStatus;
+        public string ResourceLimitsSummary => string.Format(
+            "Новые индексы: RAM от {0} ГБ, диск от {1} ГБ. Готовые индексы: RAM от {2} ГБ, резерв диска {3} ГБ.",
+            Settings.ResourceLimits.MinimumAvailableMemoryGb,
+            Settings.ResourceLimits.CacheCreationThresholdGb,
+            Settings.ResourceLimits.CriticalAvailableMemoryGb,
+            Settings.ResourceLimits.MinimumFreeDiskSpaceGb);
         public bool IsRunning => _snapshot.IsRunning;
         public bool IsRegistered => _snapshot.IsRegistered;
         public string ModelsSummary => string.Format("Строк в каталоге: {0}", _models.Length);
@@ -403,7 +418,33 @@ namespace AdvancedTools.BimBridge
         {
             Settings.LoadedProjectNames = string.Join("; ", SelectedProjects);
             Settings.Save();
-            await _controller.RefreshAsync().ConfigureAwait(false);
+            _controller.ApplyResourceSettings();
+            _resourceSignal.Request();
+            await Task.CompletedTask;
+        }
+
+        private void OpenResourceLimits()
+        {
+            if (_resourceWindow != null)
+            {
+                if (_resourceWindow.WindowState == WindowState.Minimized) _resourceWindow.WindowState = WindowState.Normal;
+                _resourceWindow.Activate(); return;
+            }
+            var dialogViewModel = new ResourceLimitsViewModel(
+                Settings.ResourceLimits,
+                () => ResourceStatus,
+                value =>
+                {
+                    Settings.ResourceLimits.CopyFrom(value);
+                    Settings.Save();
+                    _controller.ApplyResourceSettings();
+                    OnPropertyChanged(nameof(ResourceLimitsSummary));
+                    _resourceSignal.Request();
+                }, Settings);
+            var dialog = new ResourceLimitsWindow(dialogViewModel);
+            _resourceWindow = dialog;
+            dialog.Closed += (sender, args) => _resourceWindow = null;
+            dialog.Show();
         }
 
         private static string LocalizeOperation(string operation)
@@ -415,6 +456,9 @@ namespace AdvancedTools.BimBridge
                 case "model-context": return "Получение каталога моделей";
                 case "search-elements": return "Поиск элементов";
                 case "load-element-properties": return "Получение свойств элементов";
+                case "get-element-relations": return "Получение связей элементов";
+                case "get-element-spatial-data": return "Получение пространственных данных";
+                case "diagnose-element-spatial-data": return "Диагностика координат SDK";
                 case "download-pilot-file": return "Выгрузка файла Pilot";
                 case "read-excel-content": return "Чтение Excel";
                 default: return operation;
@@ -428,6 +472,9 @@ namespace AdvancedTools.BimBridge
                 case "model-context": return "каталог моделей";
                 case "search-elements": return "поиск элементов";
                 case "load-element-properties": return "свойства элементов";
+                case "get-element-relations": return "родительские и дочерние элементы";
+                case "element-spatial-data": return "пространственные данные";
+                case "spatial-diagnostics": return "диагностика координат SDK";
                 case "download-pilot-file": return "выгрузка файлов";
                 case "read-excel-content": return "чтение Excel";
                 case "resolve-model-key": return "разрешение GUID моделей";
@@ -443,6 +490,8 @@ namespace AdvancedTools.BimBridge
         {
             if (_disposed) return;
             _disposed = true;
+            _healthTimer.Stop();
+            _resourceWindow?.Close();
             _controller.State.SnapshotChanged -= OnSnapshotChanged;
             _controller.CatalogDisplayChanged -= OnCatalogDisplayChanged;
             _snapshotSignal.Dispose();

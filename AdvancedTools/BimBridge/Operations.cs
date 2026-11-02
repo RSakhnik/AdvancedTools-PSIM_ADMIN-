@@ -20,6 +20,7 @@ namespace AdvancedTools.BimBridge
         public BimTaskAssignmentDto Assignment { get; set; }
         public CancellationToken CancellationToken { get; set; }
         public Action<int, string> ReportProgress { get; set; }
+        public OperationResourceScope Resources { get; set; }
     }
 
     public interface IBimOperationHandler
@@ -106,11 +107,18 @@ namespace AdvancedTools.BimBridge
         public async Task<object> ExecuteAsync(TaskExecutionContext context)
         {
             context.CancellationToken.ThrowIfCancellationRequested();
+            var readiness = await _models.WaitForPartsCatalogAsync(
+                TimeSpan.FromSeconds(30),
+                context.CancellationToken).ConfigureAwait(false);
             var models = await _models.GetModelsAsync(context.CancellationToken).ConfigureAwait(false);
             return new
             {
                 GeneratedAtUtc = DateTime.UtcNow,
                 ActiveModelKey = models.FirstOrDefault(x => x.IsActive)?.ModelKey,
+                CatalogState = readiness.State,
+                IsPartsCatalogComplete = readiness.IsComplete,
+                UnresolvedPartCount = readiness.UnresolvedPartCount,
+                CatalogWarnings = readiness.Warnings,
                 Projects = _models.GetProjects(),
                 Models = models
             };
@@ -120,6 +128,7 @@ namespace AdvancedTools.BimBridge
     public sealed class SearchElementsRequest
     {
         public string TargetModelKey { get; set; }
+        public DateTime? ModelVersionUtc { get; set; }
         public List<Guid> TargetModelPartIds { get; set; }
         public string LogicalOperator { get; set; } = "And";
         public List<SearchConditionRequest> Conditions { get; set; } = new List<SearchConditionRequest>();
@@ -146,6 +155,7 @@ namespace AdvancedTools.BimBridge
         private readonly ModelContextProvider _models;
         private readonly IModelSearchManager _searchManager;
         private readonly BimBridgeSettings _settings;
+        private readonly ResultFileWriter _resultWriter;
 
         public SearchElementsOperationHandler(ModelContextProvider models, IModelSearchManager searchManager)
             : this(models, searchManager, new BimBridgeSettings())
@@ -155,11 +165,13 @@ namespace AdvancedTools.BimBridge
         public SearchElementsOperationHandler(
             ModelContextProvider models,
             IModelSearchManager searchManager,
-            BimBridgeSettings settings)
+            BimBridgeSettings settings,
+            ResultFileWriter resultWriter = null)
         {
             _models = models;
             _searchManager = searchManager;
             _settings = settings ?? new BimBridgeSettings();
+            _resultWriter = resultWriter ?? new ResultFileWriter(_settings);
         }
 
         public IReadOnlyCollection<string> OperationCodes { get; } = new[] { "search-elements" };
@@ -172,7 +184,7 @@ namespace AdvancedTools.BimBridge
             request.TargetModelKey = string.IsNullOrWhiteSpace(request.TargetModelKey)
                 ? context.Assignment.TargetModelKey
                 : request.TargetModelKey;
-            var model = await _models.GetModelAsync(
+            var model = await _models.GetSearchTargetAsync(
                 request.TargetModelKey,
                 context.CancellationToken).ConfigureAwait(false);
             if (request.Conditions == null || request.Conditions.Count == 0)
@@ -197,29 +209,115 @@ namespace AdvancedTools.BimBridge
             }
             var effectiveParts = requestedParts.Length > 0
                 ? requestedParts
-                : model.TargetModelPartIds.ToArray();
-            var service = await _models.GetSearchServiceAsync(
-                model,
-                effectiveParts,
-                context.CancellationToken).ConfigureAwait(false);
-            context.CancellationToken.ThrowIfCancellationRequested();
-            var found = await Task.Run(
-                () => service.Search(state, max + 1).Take(max + 1).ToArray(),
-                context.CancellationToken).ConfigureAwait(false);
-            var truncated = found.Length > max;
-            context.ReportProgress?.Invoke(100, "Поиск завершен");
-            return new
+                : (model.TargetModelPartIds.Count > 0
+                    ? model.TargetModelPartIds.ToArray()
+                    : _models.GetKnownModelPartIds(model.ModelId));
+            var isWholeModelSearch = requestedParts.Length == 0 && model.TargetModelPartIds.Count == 0;
+            if (isWholeModelSearch && !_models.GetCatalogReadiness().IsComplete)
+                throw new BimBridgeException(
+                    BimBridgeErrorCodes.ModelNotAvailable,
+                    "The model parts catalog is partial; whole-model search cannot guarantee complete results.",
+                    true);
+            if (effectiveParts.Length == 0)
+                throw new BimBridgeException(
+                    BimBridgeErrorCodes.ModelNotAvailable,
+                    "The model parts catalog is not ready for bounded whole-model search.",
+                    true);
+
+            using (var snapshot = await _models.GetModelAsync(request.TargetModelKey, request.ModelVersionUtc, context.CancellationToken).ConfigureAwait(false))
             {
-                ModelKey = model.ModelId.ToString("D"),
-                TargetModelPartIds = effectiveParts,
-                Count = Math.Min(found.Length, max),
-                Truncated = truncated,
-                Elements = found.Take(max).Select(x => new ElementKey
+            context.Resources?.Track(snapshot);
+            ModelSnapshotPolicy.AssertSearchVersion(snapshot.Version, snapshot.InitialLatestVersion);
+            foreach (var part in effectiveParts)
+                if (!await snapshot.HasPartAsync(part, context.CancellationToken).ConfigureAwait(false))
+                    throw new BimBridgeException("PART_NOT_AVAILABLE", "Requested part is unavailable in storage.", true);
+            return await SnapshotResultPublisher.WriteAsync(_resultWriter, snapshot,
+                context.Assignment.TaskId,
+                async writer =>
                 {
-                    ModelPartId = x.ModelPartId,
-                    ElementId = x.ElementId
-                }).ToArray()
-            };
+                    var count = 0;
+                    var truncated = false;
+                    writer.WriteStartObject();
+                    writer.WritePropertyName("ModelKey");
+                    writer.WriteValue(model.ModelId.ToString("D"));
+                    writer.WritePropertyName("ModelVersionUtc");
+                    writer.WriteValue(snapshot.ModelVersionUtc);
+                    writer.WritePropertyName("SearchConsistency");
+                    writer.WriteValue("element-existence-validated");
+                    writer.WritePropertyName("TargetModelPartIds");
+                    writer.WriteStartArray();
+                    foreach (var partId in effectiveParts) writer.WriteValue(partId);
+                    writer.WriteEndArray();
+                    writer.WritePropertyName("Elements");
+                    writer.WriteStartArray();
+
+                    for (var partIndex = 0; partIndex < effectiveParts.Length; partIndex++)
+                    {
+                        context.CancellationToken.ThrowIfCancellationRequested();
+                        var lease = await _models.GetSearchServiceAsync(
+                            model,
+                            effectiveParts[partIndex],
+                            context.CancellationToken).ConfigureAwait(false);
+                        context.Resources?.Track(lease);
+                        using (lease)
+                        {
+                            var enumerator = await snapshot.Sdk.ReadAsync(storage => lease.Service.Search(
+                                state, Math.Max(1, max - count + 1)).GetEnumerator(), CancellationToken.None).ConfigureAwait(false);
+                            try
+                            {
+                            while (true)
+                            {
+                                var item = await snapshot.Sdk.ReadAsync(storage =>
+                                {
+                                    if (!enumerator.MoveNext()) return null;
+                                    var current = enumerator.Current;
+                                    return new ElementKey { ModelPartId = current.ModelPartId, ElementId = current.ElementId };
+                                }, context.CancellationToken).ConfigureAwait(false);
+                                if (item == null) break;
+                                context.CancellationToken.ThrowIfCancellationRequested();
+                                if (count >= max)
+                                {
+                                    truncated = true;
+                                    break;
+                                }
+                                await snapshot.Sdk.ReadAsync(storage =>
+                                {
+                                    SnapshotElementReader.AssertSearchElement(storage, item, snapshot.Version);
+                                    return true;
+                                }, context.CancellationToken).ConfigureAwait(false);
+                                writer.WriteStartObject();
+                                writer.WritePropertyName("ModelPartId");
+                                writer.WriteValue(item.ModelPartId);
+                                writer.WritePropertyName("ElementId");
+                                writer.WriteValue(item.ElementId);
+                                writer.WriteEndObject();
+                                count++;
+                            }
+                            }
+                            finally
+                            {
+                                await snapshot.Sdk.ReadAsync(storage => { enumerator.Dispose(); return true; }, CancellationToken.None).ConfigureAwait(false);
+                            }
+                        }
+                        context.ReportProgress?.Invoke(
+                            Math.Min(99, (partIndex + 1) * 100 / effectiveParts.Length),
+                            "Поиск по частям модели");
+                        if (truncated) break;
+                    }
+
+                    writer.WriteEndArray();
+                    writer.WritePropertyName("Count");
+                    writer.WriteValue(count);
+                    writer.WritePropertyName("Truncated");
+                    writer.WriteValue(truncated);
+                    await snapshot.AssertUnchangedAsync(context.CancellationToken).ConfigureAwait(false);
+                    System.Diagnostics.Trace.TraceInformation("BIM search model={0} version={1} found={2}", snapshot.ModelId, snapshot.ModelVersionUtc, count);
+                    _models.LogReadSummary("search-elements", snapshot, effectiveParts, count, 0);
+                    writer.WriteEndObject();
+                    context.ReportProgress?.Invoke(100, "Поиск завершен");
+                },
+                context.CancellationToken).ConfigureAwait(false);
+            }
         }
 
         private static SearchSetState BuildSearchState(SearchElementsRequest request)
@@ -281,6 +379,7 @@ namespace AdvancedTools.BimBridge
     public sealed class LoadPropertiesRequest
     {
         public string TargetModelKey { get; set; }
+        public DateTime? ModelVersionUtc { get; set; }
         public List<ElementKey> ElementIds { get; set; } = new List<ElementKey>();
         public List<string> PropertyNames { get; set; }
         public int BatchSize { get; set; } = 100;
@@ -301,12 +400,17 @@ namespace AdvancedTools.BimBridge
     {
         private readonly ModelContextProvider _models;
         private readonly BimBridgeSettings _settings;
+        private readonly ResultFileWriter _resultWriter;
         public LoadElementPropertiesOperationHandler(ModelContextProvider models)
             : this(models, new BimBridgeSettings()) { }
-        public LoadElementPropertiesOperationHandler(ModelContextProvider models, BimBridgeSettings settings)
+        public LoadElementPropertiesOperationHandler(
+            ModelContextProvider models,
+            BimBridgeSettings settings,
+            ResultFileWriter resultWriter = null)
         {
             _models = models;
             _settings = settings ?? new BimBridgeSettings();
+            _resultWriter = resultWriter ?? new ResultFileWriter(_settings);
         }
         public IReadOnlyCollection<string> OperationCodes { get; } = new[] { "load-element-properties" };
         public string Capability => "load-element-properties";
@@ -330,72 +434,111 @@ namespace AdvancedTools.BimBridge
             var batchSize = request.BatchSize <= 0 ? 100 : Math.Min(request.BatchSize, 1000);
             var model = await _models.GetModelAsync(
                 request.TargetModelKey,
+                request.ModelVersionUtc,
                 context.CancellationToken).ConfigureAwait(false);
+            context.Resources?.Track(model);
             var requestedNames = request.PropertyNames == null
                 ? null
                 : new HashSet<string>(request.PropertyNames.Where(x => !string.IsNullOrWhiteSpace(x)), StringComparer.OrdinalIgnoreCase);
-            var results = new List<object>();
             var failed = new List<ElementKey>();
             var warnings = new List<string>();
-            await _models.ResolveModelPartsAsync(
-                model.ModelId,
-                request.ElementIds.Select(x => x.ModelPartId),
-                false,
-                context.CancellationToken).ConfigureAwait(false);
-
-            for (var offset = 0; offset < request.ElementIds.Count; offset += batchSize)
+            var elementErrors = new List<ElementReadError>();
+            var emptyProperties = 0;
+            var filteredProperties = 0;
+            using (model)
             {
-                context.CancellationToken.ThrowIfCancellationRequested();
-                var batch = request.ElementIds.Skip(offset).Take(batchSize).ToArray();
-                await Task.Run(() =>
-                {
-                    foreach (var key in batch)
+                await _models.ResolveModelPartsAsync(
+                    model.ModelId,
+                    request.ElementIds.Select(x => x.ModelPartId),
+                    false,
+                    context.CancellationToken).ConfigureAwait(false);
+
+                return await SnapshotResultPublisher.WriteAsync(_resultWriter, model,
+                    context.Assignment.TaskId,
+                    async writer =>
                     {
-                        context.CancellationToken.ThrowIfCancellationRequested();
-                        try
-                        {
-                            if (!_models.IsPartInScope(model.ModelId, model.TargetModelPartIds, key.ModelPartId))
-                            {
-                                failed.Add(key);
-                                warnings.Add(string.Format(
-                                    "{0:D}/{1:D}: model part is outside the requested coordination model scope.",
-                                    key.ModelPartId,
-                                    key.ElementId));
-                                continue;
-                            }
-                            var sets = model.Storage.LoadElementProperties(
-                                new ModelElementId(key.ModelPartId, key.ElementId), model.Version) ?? Enumerable.Empty<IPropertySet>();
-                            var mapped = sets.Select(set => new
-                            {
-                                Category = set.Name,
-                                Type = set.Type,
-                                Properties = set.Properties
-                                    .Where(p => requestedNames == null || requestedNames.Count == 0 || requestedNames.Contains(p.Name))
-                                    .Select(p => new { p.Name, p.Unit, Value = SafeValue(p.Value) })
-                                    .ToArray()
-                            }).ToArray();
-                            results.Add(new { key.ModelPartId, key.ElementId, PropertySets = mapped });
-                        }
-                        catch (Exception exception)
-                        {
-                            failed.Add(key);
-                            warnings.Add($"{key.ModelPartId:D}/{key.ElementId:D}: {exception.Message}");
-                        }
-                    }
-                }, context.CancellationToken).ConfigureAwait(false);
-                context.ReportProgress?.Invoke(
-                    Math.Min(100, (offset + batch.Length) * 100 / request.ElementIds.Count),
-                    "Загрузка свойств");
-            }
+                        var serializer = JsonSerializer.CreateDefault();
+                        writer.WriteStartObject();
+                        writer.WritePropertyName("ModelKey");
+                        writer.WriteValue(model.ModelId.ToString("D"));
+                        writer.WritePropertyName("ModelVersionUtc");
+                        writer.WriteValue(model.ModelVersionUtc);
+                        writer.WritePropertyName("TargetModelPartIds");
+                        writer.WriteStartArray();
+                        foreach (var partId in model.TargetModelPartIds) writer.WriteValue(partId);
+                        writer.WriteEndArray();
+                        writer.WritePropertyName("Elements");
+                        writer.WriteStartArray();
 
-            return new
-            {
-                ModelKey = model.ModelId.ToString("D"),
-                TargetModelPartIds = model.TargetModelPartIds,
-                Elements = results,
-                FailedElementIds = failed,
-                Warnings = warnings
-            };
+                        for (var offset = 0; offset < request.ElementIds.Count; offset += batchSize)
+                        {
+                            context.CancellationToken.ThrowIfCancellationRequested();
+                            var batch = request.ElementIds.Skip(offset).Take(batchSize);
+                            var processed = 0;
+                            foreach (var key in batch)
+                            {
+                                context.CancellationToken.ThrowIfCancellationRequested();
+                                processed++;
+                                try
+                                {
+                                    if (!_models.IsPartInScope(model.ModelId, model.TargetModelPartIds, key.ModelPartId))
+                                    {
+                                        failed.Add(key);
+                                        elementErrors.Add(new ElementReadError { ModelPartId = key.ModelPartId, ElementId = key.ElementId,
+                                            Code = "PART_NOT_AVAILABLE", Message = "Part is outside the requested model scope." });
+                                        warnings.Add(string.Format(
+                                            "{0:D}/{1:D}: model part is outside the requested coordination model scope.",
+                                            key.ModelPartId,
+                                            key.ElementId));
+                                        continue;
+                                    }
+
+                                    if (!await model.HasPartAsync(key.ModelPartId, context.CancellationToken).ConfigureAwait(false))
+                                        throw new BimBridgeException("PART_NOT_AVAILABLE", "Part is absent from storage.", true);
+                                    var plain = await model.Sdk.ReadAsync(storage => SnapshotElementReader.ReadProperties(
+                                        storage, key, model.Version, requestedNames, context.CancellationToken), context.CancellationToken).ConfigureAwait(false);
+                                    if (!plain.Exists)
+                                        throw new BimBridgeException("ELEMENT_NOT_FOUND", "Element is absent from the selected snapshot.");
+                                    if (plain.TotalPropertyCount == 0) emptyProperties++;
+                                    else if (plain.SelectedPropertyCount == 0) filteredProperties++;
+                                    serializer.Serialize(writer, new
+                                    {
+                                        key.ModelPartId, key.ElementId, plain.PropertySets
+                                    });
+                                }
+                                catch (OperationCanceledException) { throw; }
+                                catch (Exception exception)
+                                {
+                                    failed.Add(key);
+                                    warnings.Add($"{key.ModelPartId:D}/{key.ElementId:D}: {exception.Message}");
+                                    elementErrors.Add(new ElementReadError { ModelPartId = key.ModelPartId, ElementId = key.ElementId,
+                                        Code = (exception as BimBridgeException)?.Code ?? "ELEMENT_READ_FAILED", Message = exception.Message });
+                                }
+                            }
+                            context.ReportProgress?.Invoke(
+                                Math.Min(100, (offset + processed) * 100 / request.ElementIds.Count),
+                                "Загрузка свойств");
+                        }
+
+                        writer.WriteEndArray();
+                        writer.WritePropertyName("FailedElementIds");
+                        serializer.Serialize(writer, failed);
+                        writer.WritePropertyName("Warnings");
+                        serializer.Serialize(writer, warnings);
+                        writer.WritePropertyName("ElementErrors");
+                        serializer.Serialize(writer, elementErrors);
+                        writer.WritePropertyName("EmptyPropertyElementCount");
+                        writer.WriteValue(emptyProperties);
+                        writer.WritePropertyName("FilteredPropertyElementCount");
+                        writer.WriteValue(filteredProperties);
+                        await model.AssertUnchangedAsync(context.CancellationToken).ConfigureAwait(false);
+                        System.Diagnostics.Trace.TraceInformation("BIM properties model={0} version={1} requested={2} failed={3} empty={4} filtered={5}",
+                            model.ModelId, model.ModelVersionUtc, request.ElementIds.Count, failed.Count, emptyProperties, filteredProperties);
+                        _models.LogReadSummary("load-element-properties", model, request.ElementIds.Select(x => x.ModelPartId), request.ElementIds.Count, failed.Count, emptyProperties, filteredProperties);
+                        writer.WriteEndObject();
+                    },
+                    context.CancellationToken).ConfigureAwait(false);
+            }
         }
 
         private static object SafeValue(object value)
@@ -405,6 +548,206 @@ namespace AdvancedTools.BimBridge
                 value is DateTime || value is Guid)
                 return value;
             return value.ToString();
+        }
+    }
+
+    public sealed class ElementRelationsRequest
+    {
+        public string TargetModelKey { get; set; }
+        public DateTime? ModelVersionUtc { get; set; }
+        public List<ElementKey> ElementIds { get; set; } = new List<ElementKey>();
+        public bool IncludeParent { get; set; } = true;
+        public bool IncludeChildren { get; set; } = true;
+        public int MaxChildren { get; set; } = 10000;
+    }
+
+    public sealed class ModelElementDescriptor
+    {
+        public Guid ModelPartId { get; set; }
+        public Guid ElementId { get; set; }
+        public Guid? ParentModelPartId { get; set; }
+        public Guid? ParentElementId { get; set; }
+        public string Name { get; set; }
+        public string Type { get; set; }
+        public string VersionUtc { get; set; }
+    }
+
+    public sealed class ElementRelationDescriptor
+    {
+        public ModelElementDescriptor Element { get; set; }
+        public ModelElementDescriptor Parent { get; set; }
+        public List<ModelElementDescriptor> Children { get; set; } = new List<ModelElementDescriptor>();
+        public bool ChildrenTruncated { get; set; }
+    }
+
+    public sealed class GetElementRelationsOperationHandler : IBimOperationHandler, IModelKeyResolverHandler
+    {
+        private readonly ModelContextProvider _models;
+        private readonly BimBridgeSettings _settings;
+        private readonly ResultFileWriter _resultWriter;
+
+        public GetElementRelationsOperationHandler(
+            ModelContextProvider models,
+            BimBridgeSettings settings,
+            ResultFileWriter resultWriter = null)
+        {
+            _models = models ?? throw new ArgumentNullException(nameof(models));
+            _settings = settings ?? new BimBridgeSettings();
+            _resultWriter = resultWriter ?? new ResultFileWriter(_settings);
+        }
+
+        public IReadOnlyCollection<string> OperationCodes { get; } = new[] { "get-element-relations" };
+        public string Capability => "get-element-relations";
+        public bool IsAvailable => _models.HasModelServices;
+
+        public async Task<object> ExecuteAsync(TaskExecutionContext context)
+        {
+            var request = BimOperationDispatcher.ReadPayload<ElementRelationsRequest>(context.Assignment);
+            request.TargetModelKey = string.IsNullOrWhiteSpace(request.TargetModelKey)
+                ? context.Assignment.TargetModelKey
+                : request.TargetModelKey;
+
+            if (request.ElementIds == null || request.ElementIds.Count == 0)
+                throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, "ElementIds is required.");
+            if (!request.IncludeParent && !request.IncludeChildren)
+                throw new BimBridgeException(
+                    BimBridgeErrorCodes.InvalidRequest,
+                    "IncludeParent or IncludeChildren must be enabled.");
+            if (request.ElementIds.Any(x => x == null || x.ModelPartId == Guid.Empty || x.ElementId == Guid.Empty))
+                throw new BimBridgeException(
+                    BimBridgeErrorCodes.InvalidRequest,
+                    "Every element must contain non-empty ModelPartId and ElementId values.");
+            if (request.ElementIds.Count > _settings.ResourceLimits.MaxPropertyElements)
+                throw new BimBridgeException(
+                    BimBridgeErrorCodes.PayloadTooLarge,
+                    string.Format(
+                        "ElementIds contains {0} items; the configured limit is {1}.",
+                        request.ElementIds.Count,
+                        _settings.ResourceLimits.MaxPropertyElements));
+
+            var maxChildren = request.MaxChildren <= 0
+                ? Math.Min(10000, _settings.ResourceLimits.MaxSearchResults)
+                : Math.Min(request.MaxChildren, _settings.ResourceLimits.MaxSearchResults);
+            var model = await _models.GetModelAsync(
+                request.TargetModelKey,
+                request.ModelVersionUtc,
+                context.CancellationToken).ConfigureAwait(false);
+            context.Resources?.Track(model);
+
+            using (model)
+            {
+                await _models.ResolveModelPartsAsync(
+                    model.ModelId,
+                    request.ElementIds.Select(x => x.ModelPartId),
+                    false,
+                    context.CancellationToken).ConfigureAwait(false);
+
+                return await SnapshotResultPublisher.WriteAsync(_resultWriter, model,
+                    context.Assignment.TaskId,
+                    async writer =>
+                    {
+                        var serializer = JsonSerializer.CreateDefault();
+                        var failed = new List<ElementKey>();
+                        var warnings = new List<string>();
+                        var elementErrors = new List<ElementReadError>();
+                        var totalChildren = 0;
+                        var truncated = false;
+
+                        writer.WriteStartObject();
+                        writer.WritePropertyName("ModelKey");
+                        writer.WriteValue(model.ModelId.ToString("D"));
+                        writer.WritePropertyName("ModelVersionUtc");
+                        writer.WriteValue(model.ModelVersionUtc);
+                        writer.WritePropertyName("Elements");
+                        writer.WriteStartArray();
+
+                        for (var index = 0; index < request.ElementIds.Count; index++)
+                        {
+                            context.CancellationToken.ThrowIfCancellationRequested();
+                            var key = request.ElementIds[index];
+                            if (!_models.IsPartInScope(model.ModelId, model.TargetModelPartIds, key.ModelPartId))
+                            {
+                                failed.Add(key);
+                                elementErrors.Add(new ElementReadError { ModelPartId = key.ModelPartId, ElementId = key.ElementId,
+                                    Code = "PART_NOT_AVAILABLE", Message = "Part is outside the requested model scope." });
+                                warnings.Add(string.Format(
+                                    "{0:D}/{1:D}: model part is outside the requested coordination model scope.",
+                                    key.ModelPartId,
+                                    key.ElementId));
+                                continue;
+                            }
+
+                            try
+                            {
+                                if (!await model.HasPartAsync(key.ModelPartId, context.CancellationToken).ConfigureAwait(false))
+                                    throw new BimBridgeException("PART_NOT_AVAILABLE", "Part is absent from storage.", true);
+                                var relation = await model.Sdk.ReadAsync(storage => SnapshotElementReader.ReadRelations(
+                                    storage, key, model.Version, request.IncludeParent, request.IncludeChildren,
+                                    maxChildren - totalChildren, warnings, context.CancellationToken), context.CancellationToken).ConfigureAwait(false);
+                                totalChildren += relation.Children.Count;
+                                truncated |= relation.ChildrenTruncated;
+                                serializer.Serialize(writer, relation);
+                            }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception exception)
+                            {
+                                failed.Add(key);
+                                warnings.Add(string.Format(
+                                    "{0:D}/{1:D}: {2}",
+                                    key.ModelPartId,
+                                    key.ElementId,
+                                    exception.Message));
+                                elementErrors.Add(new ElementReadError { ModelPartId = key.ModelPartId, ElementId = key.ElementId,
+                                    Code = (exception as BimBridgeException)?.Code ?? "ELEMENT_READ_FAILED", Message = exception.Message });
+                            }
+
+                            context.ReportProgress?.Invoke(
+                                Math.Min(100, (index + 1) * 100 / request.ElementIds.Count),
+                                "Загрузка связей элементов");
+                        }
+
+                        writer.WriteEndArray();
+                        writer.WritePropertyName("ChildrenCount");
+                        writer.WriteValue(totalChildren);
+                        writer.WritePropertyName("Truncated");
+                        writer.WriteValue(truncated);
+                        writer.WritePropertyName("FailedElementIds");
+                        serializer.Serialize(writer, failed);
+                        writer.WritePropertyName("Warnings");
+                        serializer.Serialize(writer, warnings);
+                        writer.WritePropertyName("ElementErrors");
+                        serializer.Serialize(writer, elementErrors);
+                        await model.AssertUnchangedAsync(context.CancellationToken).ConfigureAwait(false);
+                        System.Diagnostics.Trace.TraceInformation("BIM relations model={0} version={1} requested={2} failed={3}",
+                            model.ModelId, model.ModelVersionUtc, request.ElementIds.Count, failed.Count);
+                        _models.LogReadSummary("get-element-relations", model, request.ElementIds.Select(x => x.ModelPartId), request.ElementIds.Count, failed.Count);
+                        writer.WriteEndObject();
+                    },
+                    context.CancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        internal static ModelElementDescriptor CreateDescriptor(IModelElement element)
+        {
+            if (element == null || !IsValid(element.Id)) return null;
+            var parent = IsValid(element.ParentId) ? element.ParentId : null;
+            return new ModelElementDescriptor
+            {
+                ModelPartId = element.Id.ModelPartId,
+                ElementId = element.Id.ElementId,
+                ParentModelPartId = parent?.ModelPartId,
+                ParentElementId = parent?.ElementId,
+                Name = element.Name,
+                Type = element.Type,
+                VersionUtc = element.Version == DateTime.MinValue
+                    ? null
+                    : element.Version.ToUniversalTime().ToString("O")
+            };
+        }
+
+        private static bool IsValid(IModelElementId value)
+        {
+            return value != null && value.ElementId != Guid.Empty;
         }
     }
 
