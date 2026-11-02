@@ -131,7 +131,10 @@ namespace AdvancedTools.BimBridge
                 var handlers = new List<IBimOperationHandler>
                 {
                     new ModelContextOperationHandler(_models),
-                    new SearchElementsOperationHandler(_models, searchManager, _settings, resultWriter),
+                    new ExportElementsOperationHandler(_models, _settings, new ArtifactFileWriter(resultWriter.TemporaryDirectory, _settings)),
+                    new ExportSpatialOperationHandler(_models, _settings, new ArtifactFileWriter(resultWriter.TemporaryDirectory, _settings), resultWriter.TemporaryDirectory),
+                    new SearchElementsOperationHandler(_models, searchManager, _settings, resultWriter,
+                        new PagedSearch(_models, _settings, Environment.MachineName + ":" + (_objectsRepository.GetCurrentPerson()?.Id ?? 0) + ":" + _settings.DurableWorkerId)),
                     new LoadElementPropertiesOperationHandler(_models, _settings, resultWriter),
                     new GetElementRelationsOperationHandler(_models, _settings, resultWriter),
                     new GetElementSpatialDataOperationHandler(_models, _settings, resultWriter),

@@ -24,7 +24,7 @@ namespace AdvancedTools.BimBridge
 
         public void Dispose()
         {
-            if (string.IsNullOrWhiteSpace(Path)) return;
+            if (!DeleteOnDispose || string.IsNullOrWhiteSpace(Path)) return;
             TemporaryFileCleaner.TryDelete(Path);
         }
     }
@@ -380,6 +380,8 @@ namespace AdvancedTools.BimBridge
         private Task _loopTask;
         private Task _drainingOperation;
         private bool _registrationLost;
+        private bool _artifactUploadSupported;
+        private readonly DurableArtifactSpool _artifactSpool;
 
         internal static async Task<T> WithDeadlineAsync<T>(Task<T> task, int seconds)
         {
@@ -411,7 +413,8 @@ namespace AdvancedTools.BimBridge
             _workspace = workspace;
             _resultWriter = resultWriter ?? new ResultFileWriter(settings, workspace);
             _resultWriter.CleanupOldFiles();
-            _workerInstanceId = BimBridgeIdentity.Create(pilotUserId);
+            _workerInstanceId = Environment.MachineName + ":" + pilotUserId + ":" + settings.DurableWorkerId;
+            _artifactSpool = new DurableArtifactSpool(settings, _workerInstanceId, log);
             State = new BimBridgeStateStore();
             _models.CatalogChanged += OnCatalogChanged;
             State.Update(s => s.With(
@@ -451,6 +454,7 @@ namespace AdvancedTools.BimBridge
                 _client = _client ?? _clientFactory();
                 var health = await WithDeadlineAsync(_client.GetHealthAsync(), 30).ConfigureAwait(false);
                 BimBridgeException.ThrowIfError(health);
+                _artifactUploadSupported = (health.Capabilities ?? Array.Empty<string>()).Contains(ArtifactProtocol.ResumableUpload);
                 if (!string.Equals(health.ProtocolVersion, BimBridgeProtocol.Version, StringComparison.Ordinal))
                     throw new BimBridgeException("UNSUPPORTED_PROTOCOL_VERSION",
                         $"Server protocol {health.ProtocolVersion} is incompatible with {BimBridgeProtocol.Version}.");
@@ -633,6 +637,18 @@ namespace AdvancedTools.BimBridge
                         _drainingOperation = null;
                         continue;
                     }
+                    if (_artifactUploadSupported)
+                    {
+                        var artifactClient = _client as IBimBridgeArtifactClient;
+                        if (artifactClient == null) throw new BimBridgeException("CAPABILITY_NOT_AVAILABLE", "Artifact transport adapter is missing.");
+                        foreach (var pendingArtifact in _artifactSpool.Pending())
+                        {
+                            State.Update(s => s.With(state: BimBridgeClientStates.Uploading, currentTaskId: pendingArtifact.Descriptor.TaskId));
+                            await new ResumableArtifactUploader(artifactClient, _settings, _log)
+                                .UploadAsync(pendingArtifact, _registration.RegistrationId, token).ConfigureAwait(false);
+                            _artifactSpool.Remove(pendingArtifact);
+                        }
+                    }
                     State.Update(s => s.With(
                         state: BimBridgeClientStates.Waiting,
                         isRunning: true,
@@ -673,7 +689,7 @@ namespace AdvancedTools.BimBridge
                 {
                     var bridge = TransportFailurePolicy.Classify(exception);
                     _log.Error("Worker loop failure.", bridge);
-                    if (bridge.Code == "UNSUPPORTED_PROTOCOL_VERSION" || !_settings.ReconnectEnabled)
+                    if (!bridge.IsRetryable || bridge.Code == "UNSUPPORTED_PROTOCOL_VERSION" || !_settings.ReconnectEnabled)
                     {
                         SetError(bridge);
                         break;
@@ -744,13 +760,25 @@ namespace AdvancedTools.BimBridge
                     currentOperation: assignment.OperationCode,
                     progressPercent: 0));
                 Interlocked.Exchange(ref _lastReportedProgress, 0);
-                var heartbeatTask = HeartbeatLoopAsync(assignment, source, x => heartbeatFailure = x);
+                using (var heartbeatSource = CancellationTokenSource.CreateLinkedTokenSource(source.Token))
+                {
+                var heartbeatTask = HeartbeatLoopAsync(assignment, heartbeatSource, x => { heartbeatFailure = x; source.Cancel(); });
+                var preparedDelivery = false;
+                DurableArtifact artifactReservation = null;
                 BimBridgeException taskFailure = null;
                 var cancellationAcknowledged = false;
                 using (var resources = new OperationResourceScope(_log, source))
                 {
                     try
                     {
+                        if (assignment.OperationCode.StartsWith("export-", StringComparison.Ordinal) && !_artifactUploadSupported)
+                            throw new BimBridgeException("CAPABILITY_NOT_AVAILABLE", "Bulk exports require artifact-upload-v2 on Manager.");
+                        if (_artifactUploadSupported)
+                        {
+                            artifactReservation=_artifactSpool.Reserve(assignment);
+                            await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client,_settings,_log)
+                                .ReserveAsync(artifactReservation,registration.RegistrationId,source.Token).ConfigureAwait(false);
+                        }
                         var resultObject = await _dispatcher.ExecuteAsync(new TaskExecutionContext
                         {
                             Assignment = assignment,
@@ -765,6 +793,20 @@ namespace AdvancedTools.BimBridge
                             await EnsureLeaseAsync(assignment, source.Token).ConfigureAwait(false);
                             State.Update(s => s.With(state: BimBridgeClientStates.Uploading, progressPercent: 0));
                             Interlocked.Exchange(ref _lastReportedProgress, 0);
+                            if (_artifactUploadSupported)
+                            {
+                                var artifact = _artifactSpool.Prepare(result, assignment, registration.ResultChunkSizeBytes,artifactReservation);
+                                preparedDelivery = true;
+                                // SDK work is complete. Delivery has its own lifetime;
+                                // do not tie it to assignment heartbeat/lease anymore.
+                                heartbeatSource.Cancel();
+                                await heartbeatTask.ConfigureAwait(false);
+                                await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client, _settings, _log)
+                                    .UploadAsync(artifact, registration.RegistrationId, runToken).ConfigureAwait(false);
+                                _artifactSpool.Remove(artifact);
+                            }
+                            else
+                            {
                             var uploader = new ResultUploader(_client, _settings, _log);
                             await uploader.UploadAndCompleteAsync(
                                 registration.RegistrationId,
@@ -773,6 +815,7 @@ namespace AdvancedTools.BimBridge
                                 registration.ResultChunkSizeBytes,
                                 ReportTaskProgress,
                                 source.Token).ConfigureAwait(false);
+                            }
                         }
                         _log.Info($"Task completed: {assignment.TaskId}, operation={assignment.OperationCode}");
                     }
@@ -808,6 +851,11 @@ namespace AdvancedTools.BimBridge
                         activeSearchServices));
                 else
                     _log.Info("Task resource scope closed: storage=0, search services=0.");
+                if (preparedDelivery && taskFailure != null)
+                {
+                    _log.Warn("Prepared artifact retained for reconnect; task=" + assignment.TaskId + "; code=" + taskFailure.Code);
+                    taskFailure = null; _registrationLost = true;
+                }
                 if (taskFailure != null)
                     await ReportFailureAsync(assignment, taskFailure, cancellationAcknowledged, registration.RegistrationId).ConfigureAwait(false);
                 try
@@ -823,6 +871,7 @@ namespace AdvancedTools.BimBridge
                             progressPercent: 0));
                 }
                 finally { source.Cancel(); }
+                }
                 }
                 finally
                 {
@@ -1005,6 +1054,7 @@ namespace AdvancedTools.BimBridge
                     await _models.GetPendingSdkCleanup().ConfigureAwait(false);
                 }
                 catch (Exception error) { _log.Error("Asynchronous worker shutdown failed.", error); }
+                finally { _artifactSpool.Dispose(); }
             });
         }
 

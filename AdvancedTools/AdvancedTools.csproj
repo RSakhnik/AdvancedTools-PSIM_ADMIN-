@@ -37,6 +37,24 @@
       <DependentUpon>BimBridgeWindow.xaml</DependentUpon>
     </Compile>
     <Compile Include="BimBridge\Contracts.cs" />
+    <Compile Include="BimBridge\ArtifactContracts.cs" />
+    <Compile Include="BimBridge\ArtifactTransfer.cs" />
+    <Compile Include="BimBridge\BulkSelection.cs" />
+    <Compile Include="BimBridge\ArtifactWriter.cs" />
+    <Compile Include="BimBridge\ExportElements.cs" />
+    <Compile Include="BimBridge\BinarySpatialWriter.cs" />
+    <Compile Include="BimBridge\SpatialExportIndex.cs" />
+    <Compile Include="BimBridge\SpatialPrimitives.cs" />
+    <Compile Include="BimBridge\SpatialSourceContracts.cs" />
+    <Compile Include="BimBridge\ElementKey.cs" />
+    <Compile Include="BimBridge\SpatialSdkCursor.cs" />
+    <Compile Include="BimBridge\SearchRequests.cs" />
+    <Compile Include="BimBridge\SearchFilters.cs" />
+    <Compile Include="BimBridge\ModelSnapshotPolicy.cs" />
+    <Compile Include="BimBridge\PropertySnapshots.cs" />
+
+    <Compile Include="BimBridge\ExportSpatial.cs" />
+    <Compile Include="BimBridge\PagedSearch.cs" />
     <Compile Include="BimBridge\Core.cs" />
     <Compile Include="BimBridge\SdkExecution.cs" />
     <Compile Include="BimBridge\FileOperations.cs" />
@@ -126,6 +144,9 @@
     </PackageReference>
     <PackageReference Include="DocumentFormat.OpenXml">
       <Version>3.1.1</Version>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Data.Sqlite">
+      <Version>8.0.11</Version>
     </PackageReference>
     <PackageReference Include="Newtonsoft.Json">
       <Version>13.0.3</Version>

@@ -9,36 +9,6 @@ using System.Threading.Tasks;
 
 namespace AdvancedTools.BimBridge
 {
-    public static class ModelSnapshotPolicy
-    {
-        public static DateTime Select(IEnumerable<DateTime> versions, DateTime? requested)
-        {
-            var available = (versions ?? Enumerable.Empty<DateTime>()).Where(x => x != DateTime.MinValue).ToArray();
-            if (requested.HasValue)
-            {
-                var match = available.FirstOrDefault(x => x.ToUniversalTime() == requested.Value.ToUniversalTime());
-                if (match == DateTime.MinValue)
-                    throw new BimBridgeException("MODEL_VERSION_NOT_AVAILABLE", "The requested model snapshot is unavailable.", true);
-                return match;
-            }
-            if (available.Length == 0)
-                throw new BimBridgeException("MODEL_VERSION_NOT_AVAILABLE", "No model snapshot is available.", true);
-            return available.OrderByDescending(x => x.ToUniversalTime()).First();
-        }
-
-        public static void AssertUnchanged(DateTime initialLatest, IEnumerable<DateTime> current)
-        {
-            if (Select(current, null).ToUniversalTime() != initialLatest.ToUniversalTime())
-                throw new BimBridgeException("MODEL_CHANGED", "The model changed during the operation. Restart the export.", true);
-        }
-
-        public static void AssertSearchVersion(DateTime version, DateTime latest)
-        {
-            if (version.ToUniversalTime() != latest.ToUniversalTime())
-                throw new BimBridgeException("SEARCH_VERSION_UNSUPPORTED", "Pilot search supports only the latest snapshot.");
-        }
-    }
-
     // SDK values are inspected on their owning Dispatcher. Callers copy only plain data out.
     public sealed class ModelSdkAdapter
     {
@@ -103,14 +73,6 @@ namespace AdvancedTools.BimBridge
         public string Message { get; set; }
     }
 
-    public sealed class PropertyReadSnapshot
-    {
-        public bool Exists { get; set; }
-        public List<object> PropertySets { get; } = new List<object>();
-        public int TotalPropertyCount { get; set; }
-        public int SelectedPropertyCount { get; set; }
-    }
-
     public static class SnapshotElementReader
     {
         public static void AssertSearchElement(IModelStorage storage, ElementKey key, DateTime version)
@@ -120,33 +82,7 @@ namespace AdvancedTools.BimBridge
                     $"Search index element {key.ModelPartId:D}/{key.ElementId:D} is absent from snapshot {version.ToUniversalTime():O}.", true);
         }
         public static PropertyReadSnapshot ReadProperties(IModelStorage storage, ElementKey key, DateTime version, ISet<string> names, CancellationToken token = default(CancellationToken))
-        {
-            var id = new ModelElementId(key.ModelPartId, key.ElementId);
-            var result = new PropertyReadSnapshot { Exists = storage.LoadElement(id, version) != null };
-            if (!result.Exists) return result;
-            foreach (var set in storage.LoadElementProperties(id, version) ?? Enumerable.Empty<IPropertySet>())
-            {
-                token.ThrowIfCancellationRequested();
-                var properties = new List<object>();
-                foreach (var property in set.Properties)
-                {
-                    token.ThrowIfCancellationRequested();
-                    result.TotalPropertyCount++;
-                    if (names != null && names.Count > 0 && !names.Contains(property.Name)) continue;
-                    result.SelectedPropertyCount++;
-                    properties.Add(new { property.Name, property.Unit, Value = PlainValue(property.Value) });
-                }
-                result.PropertySets.Add(new { Category = set.Name, Type = PlainValue(set.Type), Properties = properties });
-            }
-            return result;
-        }
-        private static object PlainValue(object value)
-        {
-            if (value == null || value is string || value is bool || value is byte || value is short || value is int ||
-                value is long || value is float || value is double || value is decimal || value is DateTime || value is Guid || value.GetType().IsEnum)
-                return value;
-            return value.ToString();
-        }
+            => SnapshotPropertyReader.ReadProperties(storage,key,version,names,token);
         public static ElementRelationDescriptor ReadRelations(IModelStorage storage, ElementKey key, DateTime version,
             bool includeParent, bool includeChildren, int remaining, IList<string> warnings, CancellationToken token = default(CancellationToken))
         {

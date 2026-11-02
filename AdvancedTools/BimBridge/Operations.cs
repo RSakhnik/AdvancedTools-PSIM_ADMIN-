@@ -35,6 +35,11 @@ namespace AdvancedTools.BimBridge
     {
     }
 
+    public interface IAdditionalCapabilities
+    {
+        IEnumerable<string> AdditionalCapabilities { get; }
+    }
+
     public sealed class BimOperationDispatcher
     {
         private readonly Dictionary<string, IBimOperationHandler> _handlers;
@@ -53,6 +58,7 @@ namespace AdvancedTools.BimBridge
             {
                 var capabilities = _handlers.Values.Select(x => x.Capability)
                     .Where(x => !string.IsNullOrWhiteSpace(x));
+                capabilities = capabilities.Concat(_handlers.Values.OfType<IAdditionalCapabilities>().SelectMany(x => x.AdditionalCapabilities));
                 if (_handlers.Values.Any(x => x is IModelKeyResolverHandler))
                 {
                     capabilities = capabilities.Concat(new[] { "resolve-model-key" });
@@ -125,37 +131,14 @@ namespace AdvancedTools.BimBridge
         }
     }
 
-    public sealed class SearchElementsRequest
-    {
-        public string TargetModelKey { get; set; }
-        public DateTime? ModelVersionUtc { get; set; }
-        public List<Guid> TargetModelPartIds { get; set; }
-        public string LogicalOperator { get; set; } = "And";
-        public List<SearchConditionRequest> Conditions { get; set; } = new List<SearchConditionRequest>();
-        public int MaxResults { get; set; } = 10000;
-    }
-
-    public sealed class SearchConditionRequest
-    {
-        public string Category { get; set; }
-        public string Name { get; set; }
-        public string DataType { get; set; }
-        public string Operator { get; set; }
-        public JToken Value { get; set; }
-    }
-
-    public sealed class ElementKey
-    {
-        public Guid ModelPartId { get; set; }
-        public Guid ElementId { get; set; }
-    }
-
-    public sealed class SearchElementsOperationHandler : IBimOperationHandler, IModelKeyResolverHandler
+    public sealed class SearchElementsOperationHandler : IBimOperationHandler, IModelKeyResolverHandler, IAdditionalCapabilities
     {
         private readonly ModelContextProvider _models;
         private readonly IModelSearchManager _searchManager;
         private readonly BimBridgeSettings _settings;
         private readonly ResultFileWriter _resultWriter;
+        private readonly PagedSearch _paging;
+        public IEnumerable<string> AdditionalCapabilities => _paging == null ? Array.Empty<string>() : new[] { ArtifactProtocol.PagedSearch };
 
         public SearchElementsOperationHandler(ModelContextProvider models, IModelSearchManager searchManager)
             : this(models, searchManager, new BimBridgeSettings())
@@ -166,12 +149,13 @@ namespace AdvancedTools.BimBridge
             ModelContextProvider models,
             IModelSearchManager searchManager,
             BimBridgeSettings settings,
-            ResultFileWriter resultWriter = null)
+            ResultFileWriter resultWriter = null, PagedSearch paging = null)
         {
             _models = models;
             _searchManager = searchManager;
             _settings = settings ?? new BimBridgeSettings();
             _resultWriter = resultWriter ?? new ResultFileWriter(_settings);
+            _paging = paging;
         }
 
         public IReadOnlyCollection<string> OperationCodes { get; } = new[] { "search-elements" };
@@ -184,6 +168,11 @@ namespace AdvancedTools.BimBridge
             request.TargetModelKey = string.IsNullOrWhiteSpace(request.TargetModelKey)
                 ? context.Assignment.TargetModelKey
                 : request.TargetModelKey;
+            if (request.PageSize.HasValue || request.Cursor != null)
+            {
+                if (_paging == null) throw new BimBridgeException("CAPABILITY_NOT_AVAILABLE", "Paged search is unavailable.");
+                return await _paging.ExecuteAsync(request, context).ConfigureAwait(false);
+            }
             var model = await _models.GetSearchTargetAsync(
                 request.TargetModelKey,
                 context.CancellationToken).ConfigureAwait(false);
@@ -192,7 +181,7 @@ namespace AdvancedTools.BimBridge
             var max = request.MaxResults <= 0
                 ? Math.Min(10000, _settings.ResourceLimits.MaxSearchResults)
                 : Math.Min(request.MaxResults, _settings.ResourceLimits.MaxSearchResults);
-            context.ReportProgress?.Invoke(10, "Подготовка поиска");
+            context.ReportProgress?.Invoke(10, "РџРѕРґРіРѕС‚РѕРІРєР° РїРѕРёСЃРєР°");
 
             var state = BuildSearchState(request);
             var requestedParts = request.TargetModelPartIds?
@@ -301,7 +290,7 @@ namespace AdvancedTools.BimBridge
                         }
                         context.ReportProgress?.Invoke(
                             Math.Min(99, (partIndex + 1) * 100 / effectiveParts.Length),
-                            "Поиск по частям модели");
+                            "РџРѕРёСЃРє РїРѕ С‡Р°СЃС‚СЏРј РјРѕРґРµР»Рё");
                         if (truncated) break;
                     }
 
@@ -314,66 +303,13 @@ namespace AdvancedTools.BimBridge
                     System.Diagnostics.Trace.TraceInformation("BIM search model={0} version={1} found={2}", snapshot.ModelId, snapshot.ModelVersionUtc, count);
                     _models.LogReadSummary("search-elements", snapshot, effectiveParts, count, 0);
                     writer.WriteEndObject();
-                    context.ReportProgress?.Invoke(100, "Поиск завершен");
+                    context.ReportProgress?.Invoke(100, "РџРѕРёСЃРє Р·Р°РІРµСЂС€РµРЅ");
                 },
                 context.CancellationToken).ConfigureAwait(false);
             }
         }
 
-        private static SearchSetState BuildSearchState(SearchElementsRequest request)
-        {
-            if (!Enum.TryParse(request.LogicalOperator, true, out SearchSetLogicalOperator logical))
-                throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, "LogicalOperator must be And or Or.");
-            var root = new SearchSetGroupState
-            {
-                ItemType = SearchSetItemType.Group,
-                GroupingOperator = logical,
-                Items = new List<SearchSetStateItem>()
-            };
-            foreach (var condition in request.Conditions)
-            {
-                if (string.IsNullOrWhiteSpace(condition.Name))
-                    throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, "Search condition Name is required.");
-                if (!Enum.TryParse(condition.DataType, true, out PropertyDataType dataType))
-                    throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, $"Unknown DataType '{condition.DataType}'.");
-                if (!Enum.TryParse(condition.Operator, true, out SearchSetEqualityOperator equality))
-                    throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, $"Unknown Operator '{condition.Operator}'.");
-                root.Items.Add(new SearchSetExpressionState
-                {
-                    ItemType = SearchSetItemType.Expression,
-                    Category = condition.Category,
-                    Field = condition.Name,
-                    DataType = dataType,
-                    EqualityOperator = equality,
-                    Value = ConvertValue(condition.Value, dataType, equality)
-                });
-            }
-            return new SearchSetState { RootGroup = root };
-        }
-
-        private static object ConvertValue(JToken token, PropertyDataType type, SearchSetEqualityOperator equality)
-        {
-            if (equality == SearchSetEqualityOperator.Defined || equality == SearchSetEqualityOperator.NotDefined)
-                return null;
-            if (token == null || token.Type == JTokenType.Null)
-                throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, "Search condition Value is required.");
-            try
-            {
-                switch (type)
-                {
-                    case PropertyDataType.Boolean: return token.Value<bool>();
-                    case PropertyDataType.Long: return token.Value<long>();
-                    case PropertyDataType.Double: return token.Value<double>();
-                    case PropertyDataType.DateTime: return token.Value<DateTime>().ToUniversalTime();
-                    case PropertyDataType.Guid: return token.Value<Guid>();
-                    default: return token.Value<string>();
-                }
-            }
-            catch (Exception exception)
-            {
-                throw new BimBridgeException(BimBridgeErrorCodes.InvalidRequest, "Search condition Value has an invalid type.", false, exception);
-            }
-        }
+        internal static SearchSetState BuildSearchState(SearchElementsRequest request) => SearchFilters.Build(request);
     }
 
     public sealed class LoadPropertiesRequest
@@ -383,17 +319,6 @@ namespace AdvancedTools.BimBridge
         public List<ElementKey> ElementIds { get; set; } = new List<ElementKey>();
         public List<string> PropertyNames { get; set; }
         public int BatchSize { get; set; } = 100;
-    }
-
-    internal sealed class ModelElementId : IModelElementId
-    {
-        public ModelElementId(Guid modelPartId, Guid elementId)
-        {
-            ModelPartId = modelPartId;
-            ElementId = elementId;
-        }
-        public Guid ElementId { get; }
-        public Guid ModelPartId { get; }
     }
 
     public sealed class LoadElementPropertiesOperationHandler : IBimOperationHandler, IModelKeyResolverHandler
@@ -517,7 +442,7 @@ namespace AdvancedTools.BimBridge
                             }
                             context.ReportProgress?.Invoke(
                                 Math.Min(100, (offset + processed) * 100 / request.ElementIds.Count),
-                                "Загрузка свойств");
+                                "Р—Р°РіСЂСѓР·РєР° СЃРІРѕР№СЃС‚РІ");
                         }
 
                         writer.WriteEndArray();
@@ -703,7 +628,7 @@ namespace AdvancedTools.BimBridge
 
                             context.ReportProgress?.Invoke(
                                 Math.Min(100, (index + 1) * 100 / request.ElementIds.Count),
-                                "Загрузка связей элементов");
+                                "Р—Р°РіСЂСѓР·РєР° СЃРІСЏР·РµР№ СЌР»РµРјРµРЅС‚РѕРІ");
                         }
 
                         writer.WriteEndArray();

@@ -194,6 +194,18 @@ namespace AdvancedTools.BimBridge
 
         public int SettingsSchemaVersion { get; set; } = CurrentSettingsSchemaVersion;
         public bool AutoStart { get; set; }
+        public string DurableWorkerId { get; set; } = Guid.NewGuid().ToString("N");
+        public int MaxInFlightChunks { get; set; } = 3;
+        public int MaxUploadChunkBytes { get; set; } = 4 * 1024 * 1024;
+        public long MaxArtifactBytes { get; set; } = 8L * 1024 * 1024 * 1024;
+        public long ArtifactDiskQuotaBytes { get; set; } = 16L * 1024 * 1024 * 1024;
+        public int ArtifactRetentionHours { get; set; } = 24;
+        public long MaxExportElements { get; set; } = 10000000;
+        public long SelectionDiskQuotaBytes { get; set; } = 1024L * 1024 * 1024;
+        public int CursorRetentionMinutes { get; set; } = 60;
+        public int MaxExportRecordBytes { get; set; } = 16 * 1024 * 1024;
+        public long MaxBulkSpatialNodes { get; set; } = 10000000;
+        public long SpatialScratchQuotaBytes { get; set; } = 2L * 1024 * 1024 * 1024;
         public bool AutoRegister { get; set; } = true;
         public bool ReconnectEnabled { get; set; } = true;
         public int OperationTimeoutSeconds { get; set; } = 1200;
@@ -219,7 +231,10 @@ namespace AdvancedTools.BimBridge
         {
             try
             {
-                if (!File.Exists(SettingsPath)) return new BimBridgeSettings();
+                if (!File.Exists(SettingsPath))
+                {
+                    var initial = new BimBridgeSettings(); initial.Save(); return initial;
+                }
                 var json = File.ReadAllText(SettingsPath, Encoding.UTF8);
                 var sourceVersion = JObject.Parse(json).Value<int?>(nameof(SettingsSchemaVersion)) ?? 0;
                 var settings = JsonConvert.DeserializeObject<BimBridgeSettings>(json)
@@ -228,6 +243,7 @@ namespace AdvancedTools.BimBridge
                 settings.ResourceLimits = settings.ResourceLimits ?? new ResourceLimitSettings();
                 settings.Migrate(sourceVersion);
                 settings.Normalize();
+                settings.Save(); // persist the stable identity when migrating an older settings file
                 return settings;
             }
             catch
@@ -258,6 +274,18 @@ namespace AdvancedTools.BimBridge
 
         private void Normalize()
         {
+            if (!Guid.TryParse(DurableWorkerId, out _)) DurableWorkerId = Guid.NewGuid().ToString("N");
+            MaxInFlightChunks = Math.Max(1, Math.Min(4, MaxInFlightChunks));
+            MaxUploadChunkBytes=Math.Max(1024,Math.Min(4*1024*1024,MaxUploadChunkBytes));
+            MaxExportElements=Math.Max(1,MaxExportElements);
+            MaxBulkSpatialNodes=Math.Max(1,MaxBulkSpatialNodes);
+            MaxExportRecordBytes=Math.Max(1024,Math.Min(64*1024*1024,MaxExportRecordBytes));
+            SelectionDiskQuotaBytes=Math.Max(1048576,SelectionDiskQuotaBytes);
+            SpatialScratchQuotaBytes=Math.Max(1048576,SpatialScratchQuotaBytes);
+            CursorRetentionMinutes=Math.Max(1,CursorRetentionMinutes);
+            MaxArtifactBytes = Math.Max(1048576, MaxArtifactBytes);
+            ArtifactDiskQuotaBytes = Math.Max(MaxArtifactBytes, ArtifactDiskQuotaBytes);
+            ArtifactRetentionHours = Math.Max(1, ArtifactRetentionHours);
             if (SdkDispatcherQueueTimeoutSeconds <= 0) SdkDispatcherQueueTimeoutSeconds = 10;
             if (SearchServiceInitializationTimeoutSeconds <= 0) SearchServiceInitializationTimeoutSeconds = 180;
             if (SdkCleanupTimeoutSeconds <= 0) SdkCleanupTimeoutSeconds = 15;

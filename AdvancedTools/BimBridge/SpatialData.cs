@@ -44,47 +44,6 @@ namespace AdvancedTools.BimBridge
         }
     }
 
-    public static class SpatialMath
-    {
-        public static bool Finite(double x) => !double.IsNaN(x) && !double.IsInfinity(x);
-        public static void ValidateMatrix(double[] m)
-        {
-            if (m == null || m.Length != 16 || m.Any(x => !Finite(x)))
-                throw new BimBridgeException("INVALID_SPATIAL_DATA", "A placement must contain 16 finite values.");
-        }
-        public static void ValidateAffine(double[] m)
-        {
-            ValidateMatrix(m);
-            if (Math.Abs(m[12]) > 1e-12 || Math.Abs(m[13]) > 1e-12 || Math.Abs(m[14]) > 1e-12 || Math.Abs(m[15]-1) > 1e-12)
-                throw new BimBridgeException("INVALID_SPATIAL_DATA", "Non-affine mesh placement is unsupported.");
-            var det = m[0]*(m[5]*m[10]-m[6]*m[9])-m[1]*(m[4]*m[10]-m[6]*m[8])+m[2]*(m[4]*m[9]-m[5]*m[8]);
-            if (!Finite(det) || det == 0) throw new BimBridgeException("INVALID_SPATIAL_DATA", "Mesh placement is singular.");
-        }
-        public static double[] Transform(double[] m, double[] p)
-        {
-            var v = new[] { m[0]*p[0]+m[1]*p[1]+m[2]*p[2]+m[3],
-                m[4]*p[0]+m[5]*p[1]+m[6]*p[2]+m[7], m[8]*p[0]+m[9]*p[1]+m[10]*p[2]+m[11] };
-            if (v.Any(x => !Finite(x))) throw new BimBridgeException("INVALID_SPATIAL_DATA", "Non-finite coordinate.");
-            return v;
-        }
-        public static double[] Matrix(Matrix4x4 m) => new[] {m.M11,m.M12,m.M13,m.M14,m.M21,m.M22,m.M23,m.M24,
-            m.M31,m.M32,m.M33,m.M34,m.M41,m.M42,m.M43,m.M44};
-    }
-
-    public sealed class SpatialBounds
-    {
-        public double[] Min { get; private set; }
-        public double[] Max { get; private set; }
-        public double[] Center => Min == null ? null : Min.Zip(Max, (a,b) => a/2+b/2).ToArray();
-        public void Add(double[] p)
-        {
-            if (p.Length != 3 || p.Any(x => !SpatialMath.Finite(x))) throw new BimBridgeException("INVALID_SPATIAL_DATA", "Non-finite vertex.");
-            if (Min == null) { Min = (double[])p.Clone(); Max = (double[])p.Clone(); return; }
-            for (var i=0;i<3;i++) { Min[i]=Math.Min(Min[i],p[i]); Max[i]=Math.Max(Max[i],p[i]); }
-        }
-        public void Union(SpatialBounds bounds) { if (bounds.Min != null) { Add(bounds.Min); Add(bounds.Max); } }
-    }
-
     // Counts actual UTF-8 output bytes rather than JSON characters. Also protects
     // scratch output; no truncated or oversized file is published as a result.
     public sealed class SpatialLimitedStream : Stream
@@ -126,40 +85,12 @@ namespace AdvancedTools.BimBridge
     }
 
     // Owned by the SDK Dispatcher, including enumerator creation, MoveNext and Dispose.
-    internal sealed class SpatialSdkCursor<T> : IDisposable
-    {
-        private IEnumerator<T> _iterator;
-        public SpatialSdkCursor(IEnumerable<T> source) { _iterator=(source ?? Enumerable.Empty<T>()).GetEnumerator(); }
-        public T[] Read(int size, CancellationToken token)
-        {
-            var list = new List<T>(size);
-            while (list.Count < size) { token.ThrowIfCancellationRequested(); if (!_iterator.MoveNext()) break; list.Add(_iterator.Current); }
-            return list.ToArray();
-        }
-        public void Dispose() { var iterator=Interlocked.Exchange(ref _iterator,null); iterator?.Dispose(); }
-    }
-
-    public sealed class SpatialInstance
-    {
-        public Guid MeshId { get; set; }
-        public Guid MeshPartId { get; set; }
-        public double[] Placement { get; set; }
-    }
-
-    // This source abstraction permits deterministic traversal/serialization tests
-    // without opening Pilot or weakening the production coordinate verification.
-    public interface ISpatialSource
-    {
-        Task<bool> ExistsAsync(ElementKey key, CancellationToken token);
-        Task VisitChildrenAsync(ElementKey key, Func<ElementKey,bool> visit, CancellationToken token);
-        Task VisitInstancesAsync(ElementKey key, Func<SpatialInstance,Task> visit, CancellationToken token);
-        Task VisitMeshAsync(SpatialInstance instance, Func<string,double[],Task> floats, Func<string,uint[],Task> indices, CancellationToken token);
-    }
-
     public sealed class SpatialSdkSource : ISpatialSource
     {
         private readonly ModelAccess _model;
-        public SpatialSdkSource(ModelAccess model) { _model=model; }
+        private readonly bool _normals,_indices,_edges;
+        public SpatialSdkSource(ModelAccess model,bool normals=true,bool indices=true,bool edges=true)
+        { _model=model;_normals=normals;_indices=indices;_edges=edges; }
         public Task<bool> ExistsAsync(ElementKey key,CancellationToken token) => _model.Sdk.ReadAsync(s =>
             s.LoadElement(new ModelElementId(key.ModelPartId,key.ElementId),_model.Version)!=null,token);
         public async Task VisitChildrenAsync(ElementKey key,Func<ElementKey,bool> visit,CancellationToken token)
@@ -198,6 +129,7 @@ namespace AdvancedTools.BimBridge
             if(mesh==null) throw new BimBridgeException("GEOMETRY_READ_FAILED","Mesh definition is unavailable.");
             foreach(var field in new[]{"Vertices","Normals"})
             {
+                if(field=="Normals"&&!_normals)continue;
                 var cursor=await _model.Sdk.ReadAsync(s => new SpatialSdkCursor<float>(field=="Vertices"?mesh.Vertices:mesh.Normals),token).ConfigureAwait(false);
                 try
                 {
@@ -212,6 +144,7 @@ namespace AdvancedTools.BimBridge
             }
             foreach(var field in new[]{"Indices","EdgeIndices"})
             {
+                if(field=="Indices"&&!_indices || field=="EdgeIndices"&&!_edges)continue;
                 var cursor=await _model.Sdk.ReadAsync(s => new SpatialSdkCursor<uint>(field=="Indices"?mesh.Indices:mesh.EdgeIndices),token).ConfigureAwait(false);
                 try
                 {

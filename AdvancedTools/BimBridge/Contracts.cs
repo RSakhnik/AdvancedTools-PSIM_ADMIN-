@@ -109,6 +109,8 @@ namespace Pilot.BimBridge.Contracts
     [ProtoInclude(112, typeof(CancelBimTaskResponseDto))]
     [ProtoInclude(113, typeof(BimBridgeHealthDto))]
     [ProtoInclude(114, typeof(BimBridgeStatisticsDto))]
+    [ProtoInclude(115, typeof(ArtifactUploadStatusDto))]
+    [ProtoInclude(116, typeof(ArtifactChunkResponseDto))]
     public abstract class BimBridgeResponseDto
     {
         [ProtoMember(1)]
@@ -583,6 +585,7 @@ namespace Pilot.BimBridge.Contracts
         public long StoredResultBytes { get; set; }
         [ProtoMember(12)]
         public string Message { get; set; }
+        [ProtoMember(14)] public string[] Capabilities { get; set; }
     }
 
     [ProtoContract]

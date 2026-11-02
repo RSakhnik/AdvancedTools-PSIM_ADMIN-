@@ -68,7 +68,8 @@ namespace AdvancedTools.BimBridge
                 _log.Info(
                     $"Connected to BIM Bridge through the authenticated Pilot session " +
                     $"({pilotClient.GetType().FullName}, transport {version}).");
-                return new BimBridgeServerClient(workerApi, diagnosticsApi);
+                return new BimBridgeServerClient(workerApi, diagnosticsApi,
+                    () => (IBimBridgeArtifactApi)GetCustomApi(pilotClient, typeof(IBimBridgeArtifactApi), callback));
             }
             catch (BimBridgeException)
             {
@@ -256,16 +257,26 @@ namespace AdvancedTools.BimBridge
         }
     }
 
-    public sealed class BimBridgeServerClient : IBimBridgeServerClient
+    public sealed class BimBridgeServerClient : IBimBridgeServerClient, IBimBridgeArtifactClient
     {
         private readonly IBimBridgeWorkerApi _worker;
         private readonly IBimBridgeDiagnosticsApi _diagnostics;
+        private readonly Lazy<IBimBridgeArtifactApi> _artifacts;
 
-        public BimBridgeServerClient(IBimBridgeWorkerApi worker, IBimBridgeDiagnosticsApi diagnostics)
+        public BimBridgeServerClient(IBimBridgeWorkerApi worker, IBimBridgeDiagnosticsApi diagnostics,
+            Func<IBimBridgeArtifactApi> artifacts = null)
         {
             _worker = worker ?? throw new ArgumentNullException(nameof(worker));
             _diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
+            _artifacts = new Lazy<IBimBridgeArtifactApi>(() => artifacts?.Invoke()
+                ?? throw new BimBridgeException("CAPABILITY_NOT_AVAILABLE", "Artifact API is unavailable."));
         }
+
+        public Task<ArtifactUploadStatusDto> BeginOrResumeAsync(BeginArtifactUploadDto request) => _artifacts.Value.BeginOrResumeUploadAsync(request);
+        public Task<ArtifactUploadStatusDto> ReserveArtifactAsync(ReserveArtifactDto request) => _artifacts.Value.ReserveArtifactAsync(request);
+        public Task<ArtifactUploadStatusDto> UploadStatusAsync(ArtifactTransferRequestDto request) => _artifacts.Value.GetUploadStatusAsync(request);
+        public Task<ArtifactChunkResponseDto> WriteArtifactChunkAsync(ArtifactChunkRequestDto request) => _artifacts.Value.WriteArtifactChunkAsync(request);
+        public Task<CompleteTaskResponseDto> CompleteArtifactAsync(ArtifactTransferRequestDto request) => _artifacts.Value.CompleteArtifactAsync(request);
 
         public Task<BimBridgeHealthDto> GetHealthAsync() => _diagnostics.GetHealthAsync();
 
