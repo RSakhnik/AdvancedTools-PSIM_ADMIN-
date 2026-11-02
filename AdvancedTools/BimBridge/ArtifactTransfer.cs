@@ -25,6 +25,9 @@ namespace AdvancedTools.BimBridge
         public string WorkerInstanceId { get; set; }
         public string Path { get; set; }
         public DateTime PreparedAtUtc { get; set; }
+        public bool ManagerPrepared { get; set; }
+        public double? WorkerProcessingWallMs {get;set;}
+        public string DeliveryErrorCode {get;set;}
         public BeginResultUploadRequestDto Descriptor { get; set; }
         [JsonIgnore] public string StatePath { get; set; }
     }
@@ -33,6 +36,7 @@ namespace AdvancedTools.BimBridge
     // not delete prepared artifacts. Only confirmed Complete or retention does.
     public sealed class DurableArtifactSpool : IDisposable
     {
+        private readonly object _gate = new object();
         private readonly string _root, _owner;
         private readonly BimBridgeSettings _settings;
         private readonly IBimBridgeLog _log;
@@ -62,7 +66,9 @@ namespace AdvancedTools.BimBridge
                 Descriptor=new BeginResultUploadRequestDto {TaskId=assignment.TaskId,AssignmentId=assignment.AssignmentId}};
             Save(artifact);return artifact;
         }
-        public DurableArtifact Prepare(PreparedResult result, BimTaskAssignmentDto assignment, int chunkSize,DurableArtifact reserved=null)
+        public DurableArtifact Prepare(PreparedResult result, BimTaskAssignmentDto assignment, int chunkSize,DurableArtifact reserved=null,double? processingWallMs=null)
+        { lock(_gate) return PrepareCore(result,assignment,chunkSize,reserved,processingWallMs); }
+        private DurableArtifact PrepareCore(PreparedResult result, BimTaskAssignmentDto assignment, int chunkSize,DurableArtifact reserved=null,double? processingWallMs=null)
         {
             if (chunkSize <= 0) throw new BimBridgeException("PROTOCOL_ERROR", "Invalid artifact chunk size.");
             if (result.Length < 0 || result.Length > _settings.MaxArtifactBytes)
@@ -71,7 +77,7 @@ namespace AdvancedTools.BimBridge
             if (occupied > _settings.ArtifactDiskQuotaBytes - result.Length)
                 throw new BimBridgeException("RESOURCE_LIMIT", "Durable artifact disk quota exceeded.");
             var id = reserved?.TransferId??Guid.NewGuid();
-            var artifact = new DurableArtifact { TransferId = id, WorkerInstanceId = _owner, PreparedAtUtc = DateTime.UtcNow,
+            var artifact = new DurableArtifact { TransferId = id, WorkerInstanceId = _owner, PreparedAtUtc = DateTime.UtcNow, WorkerProcessingWallMs=processingWallMs,
                 Path = System.IO.Path.Combine(_root, id.ToString("N") + ".artifact"),
                 StatePath = System.IO.Path.Combine(_root, id.ToString("N") + ".json"),
                 Descriptor = new BeginResultUploadRequestDto { TaskId = assignment.TaskId, AssignmentId = assignment.AssignmentId,
@@ -101,6 +107,8 @@ namespace AdvancedTools.BimBridge
             return artifact;
         }
         public DurableArtifact[] Pending()
+        { lock(_gate) return PendingCore(); }
+        private DurableArtifact[] PendingCore()
         {
             var retention=DateTime.UtcNow-TimeSpan.FromHours(_settings.ArtifactRetentionHours);
             foreach(var orphan in Directory.EnumerateFiles(_root,"*.artifact"))
@@ -140,7 +148,29 @@ namespace AdvancedTools.BimBridge
             }
             return result.ToArray();
         }
+        public long OccupiedBytes
+        {get {lock(_gate)return Directory.EnumerateFiles(_root,"*.artifact").Sum(path=>new FileInfo(path).Length);}}
+        public int FailedDeliveries
+        {get {lock(_gate)return Directory.EnumerateFiles(_root,"*.failed").Count();}}
+        public void Quarantine(DurableArtifact artifact,string code)
+        {
+            lock(_gate)
+            {
+                // Retain immutable bytes and descriptor for inspection. Terminal
+                // transfers leave the runnable queue without silently deleting data.
+                artifact.DeliveryErrorCode=code; Save(artifact);
+                var target=System.IO.Path.ChangeExtension(artifact.StatePath,".failed");
+                File.Move(artifact.StatePath,target);
+                _log?.Warn("Artifact delivery terminal; retained for inspection: "+artifact.TransferId+"; code="+code);
+            }
+        }
+        public bool IsQuarantined(DurableArtifact artifact)
+        {lock(_gate)return File.Exists(System.IO.Path.ChangeExtension(artifact.StatePath,".failed"));}
+        public void MarkPrepared(DurableArtifact artifact)
+        { lock(_gate) { if(File.Exists(artifact.StatePath)&&File.Exists(artifact.Path)) {artifact.ManagerPrepared=true; Save(artifact);} } }
         public void Remove(DurableArtifact artifact)
+        { lock(_gate) RemoveCore(artifact); }
+        private void RemoveCore(DurableArtifact artifact)
         {
             // Delete state first only after confirmed server completion. An orphan
             // data file can be retained, but cannot cause another SDK extraction.
@@ -152,11 +182,12 @@ namespace AdvancedTools.BimBridge
 
     public sealed class ResumableArtifactUploader
     {
+        private readonly Action<double> _retryWait;
         private readonly IBimBridgeArtifactClient _client;
         private readonly BimBridgeSettings _settings;
         private readonly IBimBridgeLog _log;
-        public ResumableArtifactUploader(IBimBridgeArtifactClient client, BimBridgeSettings settings, IBimBridgeLog log)
-        { _client = client; _settings = settings; _log = log; }
+        public ResumableArtifactUploader(IBimBridgeArtifactClient client, BimBridgeSettings settings, IBimBridgeLog log, Action<double> retryWait=null)
+        { _client = client; _settings = settings; _log = log; _retryWait=retryWait; }
 
         private async Task<T> Rpc<T>(Func<Task<T>> invoke, CancellationToken token) where T : BimBridgeResponseDto
         {
@@ -187,9 +218,18 @@ namespace AdvancedTools.BimBridge
                     if (!failure.IsRetryable || attempt + 1 >= attempts) throw failure;
                     var jitter = 0.8 + new Random(Guid.NewGuid().GetHashCode()).NextDouble() * 0.4;
                     _log?.Warn($"Artifact RPC retry: code={failure.Code}; attempt={attempt+1}.");
-                    await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(10000, 500*Math.Pow(2,attempt))*jitter),token).ConfigureAwait(false);
+                    var retryWatch=Stopwatch.StartNew();
+                    try { await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(10000, 500*Math.Pow(2,attempt))*jitter),token).ConfigureAwait(false); }
+                    finally { _retryWait?.Invoke(retryWatch.Elapsed.TotalMilliseconds); }
                 }
             }
+        }
+
+        public async Task PrepareAsync(DurableArtifact artifact,Guid registration,CancellationToken token)
+        {
+            artifact.Descriptor.RegistrationId=registration;
+            await Rpc(()=>_client.BeginOrResumeAsync(new BeginArtifactUploadDto {TransferId=artifact.TransferId,
+                WorkerInstanceId=artifact.WorkerInstanceId,Descriptor=artifact.Descriptor,WorkerProcessingWallMs=artifact.WorkerProcessingWallMs}),token).ConfigureAwait(false);
         }
 
         public async Task UploadAsync(DurableArtifact artifact, Guid registration, CancellationToken token)
@@ -198,7 +238,7 @@ namespace AdvancedTools.BimBridge
             artifact.Descriptor.RegistrationId = registration;
             var identity = new ArtifactTransferRequestDto { TransferId = artifact.TransferId, WorkerInstanceId = artifact.WorkerInstanceId, RegistrationId = registration };
             var status = await Rpc(() => _client.BeginOrResumeAsync(new BeginArtifactUploadDto {
-                TransferId = artifact.TransferId, WorkerInstanceId = artifact.WorkerInstanceId, Descriptor = artifact.Descriptor }),token).ConfigureAwait(false);
+                TransferId = artifact.TransferId, WorkerInstanceId = artifact.WorkerInstanceId, Descriptor = artifact.Descriptor, WorkerProcessingWallMs=artifact.WorkerProcessingWallMs }),token).ConfigureAwait(false);
             if (!status.Completed)
             {
                 status = await Rpc(() => _client.UploadStatusAsync(identity),token).ConfigureAwait(false);

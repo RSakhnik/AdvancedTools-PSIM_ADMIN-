@@ -1,4 +1,4 @@
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Pilot.BimBridge.Contracts;
 using System;
@@ -199,6 +199,8 @@ namespace AdvancedTools.BimBridge
         public int MaxUploadChunkBytes { get; set; } = 4 * 1024 * 1024;
         public long MaxArtifactBytes { get; set; } = 8L * 1024 * 1024 * 1024;
         public long ArtifactDiskQuotaBytes { get; set; } = 16L * 1024 * 1024 * 1024;
+        public int MaxPreparedArtifacts { get; set; } = 2;
+        public long MaxPreparedArtifactBytes { get; set; } = 16L * 1024 * 1024 * 1024;
         public int ArtifactRetentionHours { get; set; } = 24;
         public long MaxExportElements { get; set; } = 10000000;
         public long SelectionDiskQuotaBytes { get; set; } = 1024L * 1024 * 1024;
@@ -285,6 +287,8 @@ namespace AdvancedTools.BimBridge
             CursorRetentionMinutes=Math.Max(1,CursorRetentionMinutes);
             MaxArtifactBytes = Math.Max(1048576, MaxArtifactBytes);
             ArtifactDiskQuotaBytes = Math.Max(MaxArtifactBytes, ArtifactDiskQuotaBytes);
+            MaxPreparedArtifacts = Math.Max(1, Math.Min(16, MaxPreparedArtifacts));
+            MaxPreparedArtifactBytes = Math.Max(MaxArtifactBytes, Math.Min(ArtifactDiskQuotaBytes, MaxPreparedArtifactBytes));
             ArtifactRetentionHours = Math.Max(1, ArtifactRetentionHours);
             if (SdkDispatcherQueueTimeoutSeconds <= 0) SdkDispatcherQueueTimeoutSeconds = 10;
             if (SearchServiceInitializationTimeoutSeconds <= 0) SearchServiceInitializationTimeoutSeconds = 180;

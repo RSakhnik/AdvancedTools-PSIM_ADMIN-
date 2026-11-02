@@ -1,4 +1,4 @@
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using Pilot.BimBridge.Contracts;
 using System;
 using System.Collections.Generic;
@@ -382,6 +382,7 @@ namespace AdvancedTools.BimBridge
         private bool _registrationLost;
         private bool _artifactUploadSupported;
         private readonly DurableArtifactSpool _artifactSpool;
+        private PreparedArtifactPipeline _deliveryPipeline;
 
         internal static async Task<T> WithDeadlineAsync<T>(Task<T> task, int seconds)
         {
@@ -574,6 +575,7 @@ namespace AdvancedTools.BimBridge
             var s = State.Current;
             var catalog = _models.GetCatalogReadiness();
             return
+                $"Pipeline: SDK execution-slot busy={_deliveryPipeline?.SdkBusyMs:0}ms; idle={_deliveryPipeline?.SdkIdleMs:0}ms; upload={_deliveryPipeline?.UploadBusyMs:0}ms; retry={_deliveryPipeline?.UploadRetryWaitMs:0}ms; prepared={_deliveryPipeline?.PreparedQueueDepth}; bytes={_deliveryPipeline?.PreparedQueueBytes}; retained failed={_artifactSpool.FailedDeliveries}{Environment.NewLine}" +
                 $"State: {s.State}{Environment.NewLine}" +
                 $"WorkerInstanceId: {s.WorkerInstanceId}{Environment.NewLine}" +
                 $"RegistrationId: {s.RegistrationId:D}{Environment.NewLine}" +
@@ -590,6 +592,40 @@ namespace AdvancedTools.BimBridge
         }
 
         private async Task RunLoopAsync(CancellationToken token)
+        {
+            using(var deliverySource=CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                _deliveryPipeline=new PreparedArtifactPipeline(_artifactSpool,_settings,DeliverArtifactAsync,
+                    error=>_log.Warn("Artifact delivery paused; durable bytes retained: "+error.Message));
+                var delivery=Task.Run(()=>_deliveryPipeline.RunAsync(deliverySource.Token));
+                try {await RunExecutionLoopAsync(token).ConfigureAwait(false);}
+                finally {deliverySource.Cancel();await delivery.ConfigureAwait(false);}
+            }
+        }
+
+        private async Task DeliverArtifactAsync(DurableArtifact artifact,CancellationToken token)
+        {
+            if(_registration==null)await RegisterAsync().ConfigureAwait(false);
+            var registration=_registration;
+            var client=_client as IBimBridgeArtifactClient;
+            if(registration==null||client==null)throw new BimBridgeException("TRANSPORT_ERROR","Artifact connection unavailable.",true);
+            var uploader=new ResumableArtifactUploader(client,_settings,_log,_deliveryPipeline.RecordRetryMs);
+            try
+            {
+                await uploader.PrepareAsync(artifact,registration.RegistrationId,token).ConfigureAwait(false);
+                _artifactSpool.MarkPrepared(artifact);
+                await uploader.UploadAsync(artifact,registration.RegistrationId,token).ConfigureAwait(false);
+            }
+            catch(BimBridgeException error)
+            {
+                if(ReferenceEquals(_registration,registration) &&
+                    (error.Code==BimBridgeErrorCodes.WorkerNotRegistered||error.Code==BimBridgeErrorCodes.WorkerOffline))
+                    _registrationLost=true;
+                throw;
+            }
+        }
+
+        private async Task RunExecutionLoopAsync(CancellationToken token)
         {
             var reconnectAttempt = 0;
             while (!token.IsCancellationRequested)
@@ -639,15 +675,18 @@ namespace AdvancedTools.BimBridge
                     }
                     if (_artifactUploadSupported)
                     {
-                        var artifactClient = _client as IBimBridgeArtifactClient;
-                        if (artifactClient == null) throw new BimBridgeException("CAPABILITY_NOT_AVAILABLE", "Artifact transport adapter is missing.");
-                        foreach (var pendingArtifact in _artifactSpool.Pending())
+                        while(!_deliveryPipeline.CanAccept)
                         {
-                            State.Update(s => s.With(state: BimBridgeClientStates.Uploading, currentTaskId: pendingArtifact.Descriptor.TaskId));
-                            await new ResumableArtifactUploader(artifactClient, _settings, _log)
-                                .UploadAsync(pendingArtifact, _registration.RegistrationId, token).ConfigureAwait(false);
-                            _artifactSpool.Remove(pendingArtifact);
+                            var paused=await WithDeadlineAsync(_client.HeartbeatAsync(new WorkerHeartbeatRequestDto {
+                                RegistrationId=_registration.RegistrationId,State=BimWorkerStates.Degraded,
+                                AvailableModelKeys=_models.GetModelKeys(),Capabilities=_dispatcher.Capabilities,
+                                StatusMessage="Prepared artifact backpressure",ClientTimeUtc=DateTime.UtcNow}),30).ConfigureAwait(false);
+                            BimBridgeException.ThrowIfError(paused);
+                            if(!paused.RegistrationIsValid)throw new BimBridgeException(BimBridgeErrorCodes.WorkerNotRegistered,"Registration expired.",true);
+                            if(_registrationLost)break;
+                            await Task.Delay(TimeSpan.FromSeconds(Math.Max(1,_registration.HeartbeatIntervalSeconds)),token).ConfigureAwait(false);
                         }
+                        if(_registrationLost)continue;
                     }
                     State.Update(s => s.With(
                         state: BimBridgeClientStates.Waiting,
@@ -779,31 +818,61 @@ namespace AdvancedTools.BimBridge
                             await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client,_settings,_log)
                                 .ReserveAsync(artifactReservation,registration.RegistrationId,source.Token).ConfigureAwait(false);
                         }
-                        var resultObject = await _dispatcher.ExecuteAsync(new TaskExecutionContext
+                        var sdkStarted=System.Diagnostics.Stopwatch.GetTimestamp();
+                        long processingTicks=0;
+                        var processingPipeline=_deliveryPipeline;
+                        object resultObject;
+                        try { resultObject = await _dispatcher.ExecuteAsync(new TaskExecutionContext
                         {
                             Assignment = assignment,
                             CancellationToken = source.Token,
                             ReportProgress = ReportTaskProgress,
                             Resources = resources
-                        }).ConfigureAwait(false);
+                        }).ConfigureAwait(false); }
+                        finally { processingTicks=System.Diagnostics.Stopwatch.GetTimestamp()-sdkStarted;processingPipeline.RecordSdkTicks(processingTicks); }
                         source.Token.ThrowIfCancellationRequested();
-                        using (var result = resultObject as PreparedResult ?? await _resultWriter.WriteAsync(assignment.TaskId, resultObject, source.Token)
-                                   .ConfigureAwait(false))
+                        var preparedResult=resultObject as PreparedResult;
+                        if(preparedResult==null)
+                        {
+                            var serializationStarted=System.Diagnostics.Stopwatch.GetTimestamp();
+                            try {preparedResult=await _resultWriter.WriteAsync(assignment.TaskId,resultObject,source.Token).ConfigureAwait(false);}
+                            finally {var elapsed=System.Diagnostics.Stopwatch.GetTimestamp()-serializationStarted;processingTicks+=elapsed;processingPipeline.RecordSdkTicks(elapsed);}
+                        }
+                        using (var result = preparedResult)
                         {
                             await EnsureLeaseAsync(assignment, source.Token).ConfigureAwait(false);
                             State.Update(s => s.With(state: BimBridgeClientStates.Uploading, progressPercent: 0));
                             Interlocked.Exchange(ref _lastReportedProgress, 0);
                             if (_artifactUploadSupported)
                             {
-                                var artifact = _artifactSpool.Prepare(result, assignment, registration.ResultChunkSizeBytes,artifactReservation);
+                                var artifact = _artifactSpool.Prepare(result, assignment, registration.ResultChunkSizeBytes,artifactReservation,
+                                    processingTicks*1000d/System.Diagnostics.Stopwatch.Frequency);
                                 preparedDelivery = true;
+                                // Notify preparation independently of the large-upload
+                                // lane so artifact A cannot delay releasing SDK task B.
+                                try
+                                {
+                                    await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client,_settings,_log)
+                                        .PrepareAsync(artifact,registration.RegistrationId,source.Token).ConfigureAwait(false);
+                                    _artifactSpool.MarkPrepared(artifact);
+                                }
+                                catch(BimBridgeException error) when(error.IsRetryable)
+                                { _log.Warn("Prepare acknowledgement deferred to delivery recovery: "+error.Code); }
                                 // SDK work is complete. Delivery has its own lifetime;
                                 // do not tie it to assignment heartbeat/lease anymore.
+                                // Retain assignment heartbeats until Manager has durably
+                                // acknowledged preparation and released the execution slot.
+                                while(_artifactSpool.Pending().Any(a=>a.TransferId==artifact.TransferId&&!a.ManagerPrepared))
+                                    await Task.Delay(100,source.Token).ConfigureAwait(false);
+                                if(_artifactSpool.IsQuarantined(artifact))
+                                {
+                                    preparedDelivery=false;
+                                    throw new BimBridgeException("ARTIFACT_DELIVERY_FAILED","Artifact delivery failed permanently; immutable bytes retained in spool.");
+                                }
                                 heartbeatSource.Cancel();
                                 await heartbeatTask.ConfigureAwait(false);
-                                await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client, _settings, _log)
-                                    .UploadAsync(artifact, registration.RegistrationId, runToken).ConfigureAwait(false);
-                                _artifactSpool.Remove(artifact);
+                                // The delivery lane acknowledges RESULT_PREPARED before
+                                // admission permits another SDK task. Upload/retries overlap it.
                             }
                             else
                             {
@@ -835,6 +904,7 @@ namespace AdvancedTools.BimBridge
                             taskFailure.Code == BimBridgeErrorCodes.LeaseExpired) _registrationLost = true;
                     }
                 }
+                heartbeatSource.Cancel();
                 var pendingCleanup = _models.GetPendingSdkCleanup();
                 if (!pendingCleanup.IsCompleted &&
                     await Task.WhenAny(pendingCleanup, Task.Delay(TimeSpan.FromSeconds(Math.Max(1, Math.Min(_settings.SdkCleanupTimeoutSeconds, _settings.OperationTimeoutSeconds))))).ConfigureAwait(false) != pendingCleanup)

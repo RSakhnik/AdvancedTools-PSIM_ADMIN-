@@ -82,3 +82,13 @@ lost responses. No test starts Pilot.
 
 Public protocol copies are checked by the adjacent PSIMpy tool
 `tools/sync_contracts.py --check`; Manager's Contracts project is canonical.
+
+## Bounded execution/delivery pipeline
+
+One worker still executes one SDK operation at a time. PreparedArtifactPipeline runs one independent artifact uploader. Durable spool publication precedes Manager BeginOrResume acknowledgement; the SDK executor sends this small acknowledgement independently of the large-upload lane. Only then can the next SDK task be admitted. A late acknowledgement cannot resurrect already completed spool state. Assignment heartbeats remain active until that acknowledgement; afterwards artifact transfer has its own lifetime. Upload/retry delays run outside the SDK execution loop.
+
+Defaults: MaxPreparedArtifacts=2, MaxPreparedArtifactBytes=16 GiB, one uploader, existing MaxInFlightChunks=3. Admission counts the in-flight artifact, reserves MaxArtifactBytes worst-case headroom and obeys ArtifactDiskQuotaBytes. Full queue produces controlled backpressure with worker heartbeats. Pending bytes survive stop/reconnect/restart. Terminal transfers are moved to .failed journals with immutable bytes retained for inspection; retained bytes still count against quota. Retention cleanup remains in force. DurableWorkerId/MachineName/PilotUserId identity and exclusive spool owner lock are preserved.
+
+Diagnostics include SdkBusyMs/SdkIdleMs (execution-slot wall, not pure native SDK active), UploadBusyMs (retry waits excluded), UploadRetryWaitMs, PreparedQueueDepth/Bytes and retained failed deliveries. SDK geometry speed remains the separate TransportProfiler measurement. Build validation must override OutputPath and BaseIntermediateOutputPath so running Pilot DLLs are not replaced.
+
+WorkerProcessingWallMs is measured with Stopwatch around operation execution and optional JSON result serialization, persisted with the artifact and reported separately from delivery. No Manager clock or uploader queue/retry delay enters that duration. Spool-journal publication is outside this operation metric. SDK and upload busy intervals can overlap; their totals must not be added as elapsed wall time.
