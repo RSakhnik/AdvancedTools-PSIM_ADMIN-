@@ -26,7 +26,9 @@ namespace AdvancedTools.BimBridge
         private readonly IBimBridgeLog _log;
         private readonly SemaphoreSlim _serial = new SemaphoreSlim(1, 1);
         private readonly ConcurrentDictionary<long, Call> _calls = new ConcurrentDictionary<long, Call>();
-        private long _sequence;
+        private long _sequence,_dispatcherInvocations;
+        public long SdkReadCalls=>Interlocked.Read(ref _sequence);
+        public long DispatcherInvocations=>Interlocked.Read(ref _dispatcherInvocations);
         public SdkCallGateway(Dispatcher dispatcher, BimBridgeSettings settings, IBimBridgeLog log = null)
         { _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher)); _settings = settings; _log = log; }
         public bool HasRecovery => _calls.Values.Any(c => c.Recovery);
@@ -96,6 +98,7 @@ namespace AdvancedTools.BimBridge
                 if (callAbandoned.ContainsKey(call.Id)) throw new OperationCanceledException();
                 var dispatch = _dispatcher.InvokeAsync(() =>
                 {
+                    Interlocked.Increment(ref _dispatcherInvocations);
                     token.ThrowIfCancellationRequested();
                     if (Interlocked.CompareExchange(ref call.Phase, 1, 0) != 0) throw new OperationCanceledException();
                     call.Started = true;
@@ -170,7 +173,6 @@ namespace AdvancedTools.BimBridge
         private DateTime _probeAt, _blockedAt;
         private IntPtr _popup;
         private readonly IBimBridgeLog _log;
-        private bool _disabledWindow;
         public string WindowStatus { get; private set; } = "Окна ещё не проверены";
         public bool Blocked { get; private set; }
         public string Reason { get; private set; } = "Pilot доступен";
@@ -186,11 +188,15 @@ namespace AdvancedTools.BimBridge
                     if (_probe == null || _probe.IsCompleted)
                     { _probeAt = DateTime.UtcNow; _probe = _dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background).Task; }
                     var modal = FindPopup();
-                    var blocked = _disabledWindow || modal != IntPtr.Zero || DateTime.UtcNow - _probeAt > TimeSpan.FromSeconds(5);
+                    // Pilot may keep visible shell windows disabled without an active modal dialog.
+                    // An unpaired disabled window is diagnostic only; the dispatcher timeout still
+                    // prevents SDK calls from running while the UI thread is actually stalled.
+                    var dispatcherUnresponsive = DateTime.UtcNow - _probeAt > TimeSpan.FromSeconds(5);
+                    var blocked = modal != IntPtr.Zero || dispatcherUnresponsive;
                     if (blocked && !Blocked) _blockedAt = DateTime.UtcNow;
                     if (blocked != Blocked) _log?.Info("Pilot UI state: blocked=" + blocked + "; " + WindowStatus + "; dispatcherProbeAgeSeconds=" + (DateTime.UtcNow - _probeAt).TotalSeconds.ToString("F1") + ".");
                     _popup = modal; Blocked = blocked;
-                    Reason = modal != IntPtr.Zero ? "Открыто модальное окно Pilot" : _disabledWindow ? "Окно Pilot отключено, блокирующее окно не найдено" : blocked ? "Pilot занят: Dispatcher не отвечает" : "Pilot доступен";
+                    Reason = modal != IntPtr.Zero ? "Открыто модальное окно Pilot" : dispatcherUnresponsive ? "Pilot занят: Dispatcher не отвечает" : "Pilot доступен";
                     await Task.Delay(2000, _stop.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { return; }
@@ -222,7 +228,6 @@ namespace AdvancedTools.BimBridge
                 if (candidate != disabled && IsWindow(candidate) && IsWindowEnabled(candidate) &&
                     GetWindowThreadProcessId(candidate, out pid) == _pilotThread && pid == _processId) popup = candidate;
             }
-            _disabledWindow = disabled != IntPtr.Zero;
             WindowStatus = $"Окна Pilot: видимых {visible}, отключённых {disabledCount}, с владельцем {owned}, popup={(popup != IntPtr.Zero)}";
             return popup;
         }

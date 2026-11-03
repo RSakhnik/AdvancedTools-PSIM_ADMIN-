@@ -71,6 +71,8 @@ namespace AdvancedTools.BimBridge
         }
 
         public string[] OperationCodes => _handlers.Keys.OrderBy(x => x).ToArray();
+        public string GetSpatialPerformanceDiagnostics() => _handlers.Values.OfType<ExportSpatialOperationHandler>()
+            .Select(x=>x.GetPerformanceDiagnostics()).FirstOrDefault()??"Spatial: unavailable";
 
         public Task<object> ExecuteAsync(TaskExecutionContext context)
         {

@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using Pilot.BimBridge.Contracts;
 using System;
 using System.Collections.Generic;
@@ -576,6 +576,8 @@ namespace AdvancedTools.BimBridge
             var catalog = _models.GetCatalogReadiness();
             return
                 $"Pipeline: SDK execution-slot busy={_deliveryPipeline?.SdkBusyMs:0}ms; idle={_deliveryPipeline?.SdkIdleMs:0}ms; upload={_deliveryPipeline?.UploadBusyMs:0}ms; retry={_deliveryPipeline?.UploadRetryWaitMs:0}ms; prepared={_deliveryPipeline?.PreparedQueueDepth}; bytes={_deliveryPipeline?.PreparedQueueBytes}; retained failed={_artifactSpool.FailedDeliveries}{Environment.NewLine}" +
+                _models.SdkCounterDiagnostics+Environment.NewLine+
+                _dispatcher.GetSpatialPerformanceDiagnostics()+Environment.NewLine+
                 $"State: {s.State}{Environment.NewLine}" +
                 $"WorkerInstanceId: {s.WorkerInstanceId}{Environment.NewLine}" +
                 $"RegistrationId: {s.RegistrationId:D}{Environment.NewLine}" +
@@ -675,7 +677,7 @@ namespace AdvancedTools.BimBridge
                     }
                     if (_artifactUploadSupported)
                     {
-                        while(!_deliveryPipeline.CanAccept)
+                        while(!_deliveryPipeline.CanAccept || (!_settings.AsyncArtifactUploadEnabled && _deliveryPipeline.PreparedQueueDepth>0))
                         {
                             var paused=await WithDeadlineAsync(_client.HeartbeatAsync(new WorkerHeartbeatRequestDto {
                                 RegistrationId=_registration.RegistrationId,State=BimWorkerStates.Degraded,

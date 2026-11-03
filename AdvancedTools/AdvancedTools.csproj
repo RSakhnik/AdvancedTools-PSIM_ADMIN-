@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -41,6 +41,9 @@
     <Compile Include="BimBridge\ArtifactTransfer.cs" />
     <Compile Include="BimBridge\PreparedArtifactPipeline.cs" />
     <Compile Include="BimBridge\BulkSelection.cs" />
+    <Compile Include="BimBridge\SnapshotElementIndexCache.cs" />
+    <Compile Include="BimBridge\MeshGeometryCache.cs" />
+    <Compile Include="BimBridge\SpatialPerformanceMetrics.cs" />
     <Compile Include="BimBridge\ArtifactWriter.cs" />
     <Compile Include="BimBridge\ExportElements.cs" />
     <Compile Include="BimBridge\BinarySpatialWriter.cs" />
@@ -49,6 +52,7 @@
     <Compile Include="BimBridge\SpatialSourceContracts.cs" />
     <Compile Include="BimBridge\ElementKey.cs" />
     <Compile Include="BimBridge\SpatialSdkCursor.cs" />
+    <Compile Include="BimBridge\SpatialSdkSource.cs" />
     <Compile Include="BimBridge\SearchRequests.cs" />
     <Compile Include="BimBridge\SearchFilters.cs" />
     <Compile Include="BimBridge\ModelSnapshotPolicy.cs" />

@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Pilot.BimBridge.Contracts;
 using System;
@@ -199,6 +199,14 @@ namespace AdvancedTools.BimBridge
         public int MaxUploadChunkBytes { get; set; } = 4 * 1024 * 1024;
         public long MaxArtifactBytes { get; set; } = 8L * 1024 * 1024 * 1024;
         public long ArtifactDiskQuotaBytes { get; set; } = 16L * 1024 * 1024 * 1024;
+        public bool SnapshotIndexEnabled { get; set; } = true;
+        public long SnapshotIndexMaxBytes { get; set; } = 512L * 1024 * 1024;
+        public int SnapshotIndexMaxEntries { get; set; } = 16;
+        public bool MeshCacheEnabled { get; set; } = true;
+        public long MeshCacheMaxBytes { get; set; } = 512L * 1024 * 1024;
+        public int MeshCacheMaxEntries { get; set; } = 120000;
+        public bool CoalescedNodeReadEnabled { get; set; } = true;
+        public bool AsyncArtifactUploadEnabled { get; set; } = true;
         public int MaxPreparedArtifacts { get; set; } = 2;
         public long MaxPreparedArtifactBytes { get; set; } = 16L * 1024 * 1024 * 1024;
         public int ArtifactRetentionHours { get; set; } = 24;
@@ -287,6 +295,10 @@ namespace AdvancedTools.BimBridge
             CursorRetentionMinutes=Math.Max(1,CursorRetentionMinutes);
             MaxArtifactBytes = Math.Max(1048576, MaxArtifactBytes);
             ArtifactDiskQuotaBytes = Math.Max(MaxArtifactBytes, ArtifactDiskQuotaBytes);
+            SnapshotIndexMaxBytes = Math.Max(16L*1024*1024, Math.Min(2L*1024*1024*1024, SnapshotIndexMaxBytes));
+            SnapshotIndexMaxEntries = Math.Max(1, Math.Min(128, SnapshotIndexMaxEntries));
+            MeshCacheMaxBytes = Math.Max(16L*1024*1024, Math.Min(2L*1024*1024*1024, MeshCacheMaxBytes));
+            MeshCacheMaxEntries = Math.Max(1, Math.Min(1000000, MeshCacheMaxEntries));
             MaxPreparedArtifacts = Math.Max(1, Math.Min(16, MaxPreparedArtifacts));
             MaxPreparedArtifactBytes = Math.Max(MaxArtifactBytes, Math.Min(ArtifactDiskQuotaBytes, MaxPreparedArtifactBytes));
             ArtifactRetentionHours = Math.Max(1, ArtifactRetentionHours);

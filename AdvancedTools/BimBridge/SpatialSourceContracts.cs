@@ -12,6 +12,16 @@ namespace AdvancedTools.BimBridge
 
     // This source abstraction permits deterministic traversal/serialization tests
     // without opening Pilot or weakening the production coordinate verification.
+    public sealed class SpatialNodeSnapshot
+    {
+        public SpatialInstance[] Instances {get;set;}
+        public ElementKey[] Children {get;set;}
+    }
+    public interface ISpatialNodeSource
+    {
+        bool CoalescedNodeReadEnabled {get;}
+        Task<SpatialNodeSnapshot> ReadNodeAsync(ElementKey key,bool includeChildren,CancellationToken token);
+    }
     public interface ISpatialSource
     {
         Task<bool> ExistsAsync(ElementKey key, CancellationToken token);

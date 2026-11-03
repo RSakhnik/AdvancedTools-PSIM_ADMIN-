@@ -23,8 +23,9 @@ namespace AdvancedTools.BimBridge
     {
         private readonly ModelContextProvider _models;
         private readonly BimBridgeSettings _settings;
-        public BulkSelectionReader(ModelContextProvider models, BimBridgeSettings settings)
-        { _models=models;_settings=settings; }
+        private readonly SnapshotElementIndexCache _snapshotIndex;
+        public BulkSelectionReader(ModelContextProvider models, BimBridgeSettings settings,SnapshotElementIndexCache snapshotIndex=null)
+        { _models=models;_settings=settings;_snapshotIndex=snapshotIndex; }
 
         public async Task<long> VisitAsync(ModelAccess model, BulkSelectionRequest request,
             Func<ElementKey,Task> visit, CancellationToken token)
@@ -96,6 +97,12 @@ namespace AdvancedTools.BimBridge
                         }
                         finally { await model.Sdk.ReleaseOwnedAsync(cursor).ConfigureAwait(false); }
                     }
+                }
+                else if(_snapshotIndex!=null)
+                {
+                    // Selection and spatial existence share this ordered snapshot scan.
+                    var index=await _snapshotIndex.GetAsync(model,part,token).ConfigureAwait(false);
+                    foreach(var id in index.OrderedIds)await accept(new ElementKey{ModelPartId=part,ElementId=id}).ConfigureAwait(false);
                 }
                 else
                 {

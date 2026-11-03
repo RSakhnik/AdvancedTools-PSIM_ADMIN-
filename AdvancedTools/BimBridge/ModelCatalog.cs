@@ -358,6 +358,8 @@ namespace AdvancedTools.BimBridge
 
         public event EventHandler CatalogChanged;
 
+        public string SdkCounterDiagnostics => "SDK gateway (process-wide): calls="+_sdkGateway.SdkReadCalls+
+            "; dispatcherInvocations="+_sdkGateway.DispatcherInvocations;
         public bool HasModelServices =>
             _objectsRepository != null && _modelManager != null && _storageProvider != null;
 
