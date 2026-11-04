@@ -46,6 +46,22 @@ An older Manager still works for legacy queries through the original uploader;
 bulk operations explicitly fail capability negotiation rather than extracting a
 large result that cannot be delivered reliably.
 
+## Worker responsibilities and telemetry
+
+`Worker.cs` owns registration, assignment and execution lifetime.
+`ResultFileWriter.cs` writes legacy query results; `LegacyResultUploader.cs`
+keeps the original upload path. `ArtifactTransfer.cs` owns durable spool and
+resumable delivery, while spatial processing remains in `ExportSpatial.cs`,
+`SpatialSdkSource.cs` and `BinarySpatialWriter.cs`.
+
+`TelemetryMode` defaults to `Basic`; `Off` omits per-task spatial metrics and
+`Detailed` adds cache hit/miss counters. The worker sends one profile per
+TaskId/AssignmentId with monotonic SDK, encoding, artifact and spool durations.
+Process-wide cache size, entries and evictions are copied as a snapshot at task
+completion; they must not be summed across tasks. Retry count and delay are
+checkpointed only when a transfer retry occurs. A telemetry checkpoint failure
+does not invalidate an already prepared artifact.
+
 ## New settings (PilotBimBridge/settings.json)
 
 | Setting | Default |
