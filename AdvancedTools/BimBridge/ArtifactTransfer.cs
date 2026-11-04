@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
@@ -275,8 +276,25 @@ namespace AdvancedTools.BimBridge
         {
             TransferId=artifact.TransferId,WorkerInstanceId=artifact.WorkerInstanceId,
             Descriptor=artifact.Descriptor,WorkerProcessingWallMs=artifact.WorkerProcessingWallMs,
-            SpatialPerformance=artifact.SpatialPerformance
+            SpatialPerformance=artifact.SpatialPerformance,
+            Diagnostics=SpatialDiagnostics(artifact.SpatialPerformance)
         };
+
+        private static DiagnosticEnvelopeDto SpatialDiagnostics(SpatialTaskPerformanceDto profile)
+        {
+            if(profile==null)return null;
+            try
+            {
+                var payload=Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(profile));
+                if(payload.Length>64*1024)return null;
+                using(var sha=SHA256.Create())return new DiagnosticEnvelopeDto {
+                    ContentType="application/vnd.pilot.bimbridge.spatial-performance+json",
+                    SchemaVersion=1,PayloadBytes=payload,
+                    Sha256=BitConverter.ToString(sha.ComputeHash(payload)).Replace("-","") };
+            }
+            catch(JsonException) {return null;}
+            catch(CryptographicException) {return null;}
+        }
 
         public async Task UploadAsync(DurableArtifact artifact, Guid registration, CancellationToken token)
         {
