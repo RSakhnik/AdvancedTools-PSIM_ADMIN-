@@ -53,6 +53,9 @@ large result that cannot be delivered reliably.
 keeps the original upload path. `ArtifactTransfer.cs` owns durable spool and
 resumable delivery, while spatial processing remains in `ExportSpatial.cs`,
 `SpatialSdkSource.cs` and `BinarySpatialWriter.cs`.
+`ModelCatalog.cs` builds and refreshes the model catalog; its partial
+`ModelCatalog.Resources.cs` groups storage/search acquisition, warmup, ownership
+and release. Pilot SDK calls still use the original single-threaded dispatcher.
 
 `TelemetryMode` defaults to `Basic`; `Off` omits per-task spatial metrics and
 `Detailed` adds cache hit/miss counters. The worker sends one profile per

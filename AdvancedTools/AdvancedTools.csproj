@@ -64,6 +64,7 @@
     <Compile Include="BimBridge\SdkExecution.cs" />
     <Compile Include="BimBridge\FileOperations.cs" />
     <Compile Include="BimBridge\ModelCatalog.cs" />
+    <Compile Include="BimBridge\ModelCatalog.Resources.cs" />
     <Compile Include="BimBridge\ModelSnapshots.cs" />
     <Compile Include="BimBridge\SpatialData.cs" />
     <Compile Include="BimBridge\OperationResources.cs" />
