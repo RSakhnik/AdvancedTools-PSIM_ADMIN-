@@ -27,6 +27,9 @@ namespace AdvancedTools.BimBridge
         public DateTime PreparedAtUtc { get; set; }
         public bool ManagerPrepared { get; set; }
         public double? WorkerProcessingWallMs {get;set;}
+        public int? UploadRetryCount {get;set;}
+        public double? UploadRetryWaitMs {get;set;}
+        public SpatialTaskPerformanceDto SpatialPerformance {get;set;}
         public string DeliveryErrorCode {get;set;}
         public BeginResultUploadRequestDto Descriptor { get; set; }
         [JsonIgnore] public string StatePath { get; set; }
@@ -61,13 +64,30 @@ namespace AdvancedTools.BimBridge
         {
             var id=Guid.NewGuid();
             var artifact=new DurableArtifact {TransferId=id,WorkerInstanceId=_owner,PreparedAtUtc=DateTime.UtcNow,
+                UploadRetryCount=0,UploadRetryWaitMs=0,
                 Path=System.IO.Path.Combine(_root,id.ToString("N")+".artifact"),
                 StatePath=System.IO.Path.Combine(_root,id.ToString("N")+".reservation"),
                 Descriptor=new BeginResultUploadRequestDto {TaskId=assignment.TaskId,AssignmentId=assignment.AssignmentId}};
             Save(artifact);return artifact;
         }
         public DurableArtifact Prepare(PreparedResult result, BimTaskAssignmentDto assignment, int chunkSize,DurableArtifact reserved=null,double? processingWallMs=null)
-        { lock(_gate) return PrepareCore(result,assignment,chunkSize,reserved,processingWallMs); }
+        {
+            lock(_gate)
+            {
+                var started=result.SpatialPerformance==null?0:Stopwatch.GetTimestamp();
+                var artifact=PrepareCore(result,assignment,chunkSize,reserved,processingWallMs);
+                if(artifact.SpatialPerformance!=null)
+                {
+                    artifact.SpatialPerformance.SpoolPreparationWallMs=
+                        (Stopwatch.GetTimestamp()-started)*1000d/Stopwatch.Frequency;
+                    // The artifact and its first durable state are committed already.
+                    // A telemetry checkpoint failure must not invalidate that commit.
+                    try { Save(artifact); }
+                    catch(Exception error) { _log?.Warn("Spool telemetry checkpoint failed: "+error.GetType().Name); }
+                }
+                return artifact;
+            }
+        }
         private DurableArtifact PrepareCore(PreparedResult result, BimTaskAssignmentDto assignment, int chunkSize,DurableArtifact reserved=null,double? processingWallMs=null)
         {
             if (chunkSize <= 0) throw new BimBridgeException("PROTOCOL_ERROR", "Invalid artifact chunk size.");
@@ -78,6 +98,8 @@ namespace AdvancedTools.BimBridge
                 throw new BimBridgeException("RESOURCE_LIMIT", "Durable artifact disk quota exceeded.");
             var id = reserved?.TransferId??Guid.NewGuid();
             var artifact = new DurableArtifact { TransferId = id, WorkerInstanceId = _owner, PreparedAtUtc = DateTime.UtcNow, WorkerProcessingWallMs=processingWallMs,
+                UploadRetryCount=reserved?.UploadRetryCount??0,UploadRetryWaitMs=reserved?.UploadRetryWaitMs??0,
+                SpatialPerformance=result.SpatialPerformance,
                 Path = System.IO.Path.Combine(_root, id.ToString("N") + ".artifact"),
                 StatePath = System.IO.Path.Combine(_root, id.ToString("N") + ".json"),
                 Descriptor = new BeginResultUploadRequestDto { TaskId = assignment.TaskId, AssignmentId = assignment.AssignmentId,
@@ -168,6 +190,17 @@ namespace AdvancedTools.BimBridge
         {lock(_gate)return File.Exists(System.IO.Path.ChangeExtension(artifact.StatePath,".failed"));}
         public void MarkPrepared(DurableArtifact artifact)
         { lock(_gate) { if(File.Exists(artifact.StatePath)&&File.Exists(artifact.Path)) {artifact.ManagerPrepared=true; Save(artifact);} } }
+        public void RecordRetry(DurableArtifact artifact,double waitMs)
+        {
+            if(artifact==null || double.IsNaN(waitMs) || double.IsInfinity(waitMs) || waitMs<0)return;
+            lock(_gate)
+            {
+                artifact.UploadRetryCount=(artifact.UploadRetryCount??0)+1;
+                artifact.UploadRetryWaitMs=(artifact.UploadRetryWaitMs??0)+waitMs;
+                try { if(File.Exists(artifact.StatePath))Save(artifact); }
+                catch(Exception error) { _log?.Warn("Upload retry telemetry checkpoint failed: "+error.GetType().Name); }
+            }
+        }
         public void Remove(DurableArtifact artifact)
         { lock(_gate) RemoveCore(artifact); }
         private void RemoveCore(DurableArtifact artifact)
@@ -183,13 +216,15 @@ namespace AdvancedTools.BimBridge
     public sealed class ResumableArtifactUploader
     {
         private readonly Action<double> _retryWait;
+        private readonly Action<DurableArtifact,double> _artifactRetryWait;
         private readonly IBimBridgeArtifactClient _client;
         private readonly BimBridgeSettings _settings;
         private readonly IBimBridgeLog _log;
-        public ResumableArtifactUploader(IBimBridgeArtifactClient client, BimBridgeSettings settings, IBimBridgeLog log, Action<double> retryWait=null)
-        { _client = client; _settings = settings; _log = log; _retryWait=retryWait; }
+        public ResumableArtifactUploader(IBimBridgeArtifactClient client, BimBridgeSettings settings, IBimBridgeLog log,
+            Action<double> retryWait=null,Action<DurableArtifact,double> artifactRetryWait=null)
+        { _client = client; _settings = settings; _log = log; _retryWait=retryWait; _artifactRetryWait=artifactRetryWait; }
 
-        private async Task<T> Rpc<T>(Func<Task<T>> invoke, CancellationToken token) where T : BimBridgeResponseDto
+        private async Task<T> Rpc<T>(Func<Task<T>> invoke, CancellationToken token,DurableArtifact artifact=null) where T : BimBridgeResponseDto
         {
             var attempts = Math.Max(1, _settings.ResultTransferMaxAttempts);
             for (var attempt = 0; ; attempt++)
@@ -220,7 +255,12 @@ namespace AdvancedTools.BimBridge
                     _log?.Warn($"Artifact RPC retry: code={failure.Code}; attempt={attempt+1}.");
                     var retryWatch=Stopwatch.StartNew();
                     try { await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(10000, 500*Math.Pow(2,attempt))*jitter),token).ConfigureAwait(false); }
-                    finally { _retryWait?.Invoke(retryWatch.Elapsed.TotalMilliseconds); }
+                    finally
+                    {
+                        var waitMs=retryWatch.Elapsed.TotalMilliseconds;
+                        _retryWait?.Invoke(waitMs);
+                        _artifactRetryWait?.Invoke(artifact,waitMs);
+                    }
                 }
             }
         }
@@ -228,20 +268,25 @@ namespace AdvancedTools.BimBridge
         public async Task PrepareAsync(DurableArtifact artifact,Guid registration,CancellationToken token)
         {
             artifact.Descriptor.RegistrationId=registration;
-            await Rpc(()=>_client.BeginOrResumeAsync(new BeginArtifactUploadDto {TransferId=artifact.TransferId,
-                WorkerInstanceId=artifact.WorkerInstanceId,Descriptor=artifact.Descriptor,WorkerProcessingWallMs=artifact.WorkerProcessingWallMs}),token).ConfigureAwait(false);
+            await Rpc(()=>_client.BeginOrResumeAsync(BeginRequest(artifact)),token,artifact).ConfigureAwait(false);
         }
+
+        private static BeginArtifactUploadDto BeginRequest(DurableArtifact artifact)=>new BeginArtifactUploadDto
+        {
+            TransferId=artifact.TransferId,WorkerInstanceId=artifact.WorkerInstanceId,
+            Descriptor=artifact.Descriptor,WorkerProcessingWallMs=artifact.WorkerProcessingWallMs,
+            SpatialPerformance=artifact.SpatialPerformance
+        };
 
         public async Task UploadAsync(DurableArtifact artifact, Guid registration, CancellationToken token)
         {
             var watch = Stopwatch.StartNew();
             artifact.Descriptor.RegistrationId = registration;
             var identity = new ArtifactTransferRequestDto { TransferId = artifact.TransferId, WorkerInstanceId = artifact.WorkerInstanceId, RegistrationId = registration };
-            var status = await Rpc(() => _client.BeginOrResumeAsync(new BeginArtifactUploadDto {
-                TransferId = artifact.TransferId, WorkerInstanceId = artifact.WorkerInstanceId, Descriptor = artifact.Descriptor, WorkerProcessingWallMs=artifact.WorkerProcessingWallMs }),token).ConfigureAwait(false);
+            var status = await Rpc(() => _client.BeginOrResumeAsync(BeginRequest(artifact)),token,artifact).ConfigureAwait(false);
             if (!status.Completed)
             {
-                status = await Rpc(() => _client.UploadStatusAsync(identity),token).ConfigureAwait(false);
+                status = await Rpc(() => _client.UploadStatusAsync(identity),token,artifact).ConfigureAwait(false);
                 if (status.ChunkSizeBytes <= 0 || status.ChunkSizeBytes > _settings.MaxUploadChunkBytes || artifact.Descriptor.TotalChunks !=
                     artifact.Descriptor.TotalLength / status.ChunkSizeBytes + (artifact.Descriptor.TotalLength % status.ChunkSizeBytes == 0 ? 0 : 1))
                     throw new BimBridgeException("PROTOCOL_ERROR", "Server returned conflicting chunk geometry.");
@@ -271,7 +316,7 @@ namespace AdvancedTools.BimBridge
                                 // Each RPC/retry owns its immutable buffer. A local
                                 // timeout never permits mutation of a pending call.
                                 var request = new ArtifactChunkRequestDto {Transfer=identity,ChunkIndex=index,Data=bytes,Sha256=hash};
-                                inFlight.Add(Rpc(() => _client.WriteArtifactChunkAsync(request),token));
+                                inFlight.Add(Rpc(() => _client.WriteArtifactChunkAsync(request),token,artifact));
                                 sent += bytes.Length; requests++;
                             }
                         }
@@ -285,12 +330,15 @@ namespace AdvancedTools.BimBridge
                 }
                 _log?.Info($"Artifact chunks sent: transfer={artifact.TransferId}; bytes={sent}; resumedBytes={artifact.Descriptor.TotalLength-sent}; requests={requests}; elapsedMs={watch.ElapsedMilliseconds}.");
             }
-            await Rpc(() => _client.CompleteArtifactAsync(identity),token).ConfigureAwait(false);
+            identity.UploadWallMs=watch.Elapsed.TotalMilliseconds;
+            identity.UploadRetryCount=artifact.UploadRetryCount;
+            identity.UploadRetryWaitMs=artifact.UploadRetryWaitMs;
+            await Rpc(() => _client.CompleteArtifactAsync(identity),token,artifact).ConfigureAwait(false);
             _log?.Info($"Artifact delivery confirmed: transfer={artifact.TransferId}; elapsedMs={watch.ElapsedMilliseconds}.");
         }
         public Task<ArtifactUploadStatusDto> ReserveAsync(DurableArtifact artifact,Guid registration,CancellationToken token)
             => Rpc(()=>_client.ReserveArtifactAsync(new ReserveArtifactDto {TaskId=artifact.Descriptor.TaskId,
                 AssignmentId=artifact.Descriptor.AssignmentId,Transfer=new ArtifactTransferRequestDto {TransferId=artifact.TransferId,
-                    WorkerInstanceId=artifact.WorkerInstanceId,RegistrationId=registration}}),token);
+                    WorkerInstanceId=artifact.WorkerInstanceId,RegistrationId=registration}}),token,artifact);
     }
 }

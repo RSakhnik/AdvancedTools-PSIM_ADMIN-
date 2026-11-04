@@ -20,6 +20,7 @@ namespace AdvancedTools.BimBridge
         public string ContentEncoding { get; set; }
         public long Length { get; set; }
         public string Sha256 { get; set; }
+        public SpatialTaskPerformanceDto SpatialPerformance { get; set; }
         public bool DeleteOnDispose { get; set; }
 
         public void Dispose()
@@ -611,7 +612,7 @@ namespace AdvancedTools.BimBridge
             var registration=_registration;
             var client=_client as IBimBridgeArtifactClient;
             if(registration==null||client==null)throw new BimBridgeException("TRANSPORT_ERROR","Artifact connection unavailable.",true);
-            var uploader=new ResumableArtifactUploader(client,_settings,_log,_deliveryPipeline.RecordRetryMs);
+            var uploader=new ResumableArtifactUploader(client,_settings,_log,_deliveryPipeline.RecordRetryMs,_artifactSpool.RecordRetry);
             try
             {
                 await uploader.PrepareAsync(artifact,registration.RegistrationId,token).ConfigureAwait(false);
@@ -817,7 +818,8 @@ namespace AdvancedTools.BimBridge
                         if (_artifactUploadSupported)
                         {
                             artifactReservation=_artifactSpool.Reserve(assignment);
-                            await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client,_settings,_log)
+                            await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client,_settings,_log,
+                                _deliveryPipeline.RecordRetryMs,_artifactSpool.RecordRetry)
                                 .ReserveAsync(artifactReservation,registration.RegistrationId,source.Token).ConfigureAwait(false);
                         }
                         var sdkStarted=System.Diagnostics.Stopwatch.GetTimestamp();
@@ -854,7 +856,8 @@ namespace AdvancedTools.BimBridge
                                 // lane so artifact A cannot delay releasing SDK task B.
                                 try
                                 {
-                                    await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client,_settings,_log)
+                                    await new ResumableArtifactUploader((IBimBridgeArtifactClient)_client,_settings,_log,
+                                        _deliveryPipeline.RecordRetryMs,_artifactSpool.RecordRetry)
                                         .PrepareAsync(artifact,registration.RegistrationId,source.Token).ConfigureAwait(false);
                                     _artifactSpool.MarkPrepared(artifact);
                                 }

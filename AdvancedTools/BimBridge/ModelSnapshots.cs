@@ -24,11 +24,13 @@ namespace AdvancedTools.BimBridge
             _dispatchWithToken = dispatchWithToken;
             _releaseLate = releaseLate;
         }
-        public async Task<T> ReadAsync<T>(Func<IModelStorage, T> read, CancellationToken token)
+        public async Task<T> ReadAsync<T>(Func<IModelStorage, T> read, CancellationToken token, Action<long> dispatchWait = null)
         {
             token.ThrowIfCancellationRequested();
+            var queuedAt = dispatchWait == null ? 0 : Stopwatch.GetTimestamp();
             Func<object> action = () =>
             {
+                dispatchWait?.Invoke(Stopwatch.GetTimestamp() - queuedAt);
                 token.ThrowIfCancellationRequested();
                 var storage = _storage ?? throw new ObjectDisposedException(nameof(ModelSdkAdapter));
                 return (object)read(storage);

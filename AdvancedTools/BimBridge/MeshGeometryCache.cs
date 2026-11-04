@@ -25,14 +25,15 @@ namespace AdvancedTools.BimBridge
             public override bool Equals(object value)=>value is MeshKey other&&Equals(other);
             public override int GetHashCode(){unchecked{var h=Model.GetHashCode();h=h*31+Part.GetHashCode();h=h*31+Mesh.GetHashCode();return h*31+VersionTicks.GetHashCode();}}
         }
-        private sealed class Entry {public MeshKey Key;public Geometry Value;}
+        private sealed class Entry {public MeshKey Key;public Geometry Value;public long Bytes;}
         private readonly Dictionary<MeshKey,LinkedListNode<Entry>> _entries=new Dictionary<MeshKey,LinkedListNode<Entry>>();
         private readonly LinkedList<Entry> _lru=new LinkedList<Entry>();
         private readonly object _gate=new object();private readonly long _maxBytes;private readonly int _maxEntries;
-        private long _bytes,_hits,_misses;
+        private long _bytes,_hits,_misses,_evictions;
         public MeshGeometryCache(long maxBytes,int maxEntries){_maxBytes=maxBytes;_maxEntries=maxEntries;}
         public long Bytes{get{lock(_gate)return _bytes;}}public int Entries{get{lock(_gate)return _entries.Count;}}
         public long Hits=>Interlocked.Read(ref _hits);public long Misses=>Interlocked.Read(ref _misses);
+        public long Evictions=>Interlocked.Read(ref _evictions);
         public long MaxEntryBytes=>_maxBytes/4; // A single definition cannot monopolize the worker cache.
         public static MeshKey Key(ModelAccess model,Guid part,Guid mesh)=>new MeshKey{
             Model=model.ModelId,VersionTicks=model.Version.ToUniversalTime().Ticks,Part=part,Mesh=mesh};
@@ -53,10 +54,10 @@ namespace AdvancedTools.BimBridge
             lock(_gate)
             {
                 if(_entries.TryGetValue(key,out var existing))
-                {_bytes-=existing.Value.Value.Bytes;_entries.Remove(key);_lru.Remove(existing);}
+                {_bytes-=existing.Value.Bytes;_entries.Remove(key);_lru.Remove(existing);}
                 while(_entries.Count>=_maxEntries||_bytes>_maxBytes-size)
-                {var last=_lru.Last;_entries.Remove(last.Value.Key);_bytes-=last.Value.Value.Bytes;_lru.RemoveLast();}
-                var node=new LinkedListNode<Entry>(new Entry{Key=key,Value=geometry});
+                {var last=_lru.Last;_entries.Remove(last.Value.Key);_bytes-=last.Value.Bytes;_lru.RemoveLast();Interlocked.Increment(ref _evictions);}
+                var node=new LinkedListNode<Entry>(new Entry{Key=key,Value=geometry,Bytes=size});
                 _entries.Add(key,node);_lru.AddFirst(node);_bytes+=size;
             }
         }

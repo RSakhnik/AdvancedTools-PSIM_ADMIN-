@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.IO.Compression;
+using System.Diagnostics;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -18,7 +19,7 @@ namespace AdvancedTools.BimBridge
         private readonly BimBridgeSettings _settings;
         public ArtifactFileWriter(string directory,BimBridgeSettings settings) {_directory=directory;_settings=settings;}
         public async Task<PreparedResult> WriteAsync(Guid taskId,string contentType,string fileName,bool gzip,
-            Func<Stream,CancellationToken,Task> write,CancellationToken token)
+            Func<Stream,CancellationToken,Task> write,CancellationToken token,SpatialPerformanceMetrics performance=null)
         {
             Directory.CreateDirectory(_directory);
             var path=Path.Combine(_directory,Guid.NewGuid().ToString("N")+".artifact.tmp");
@@ -35,9 +36,15 @@ namespace AdvancedTools.BimBridge
                             await write(compressor,token).ConfigureAwait(false);
                     }
                     else await write(counted,token).ConfigureAwait(false);
-                    token.ThrowIfCancellationRequested();counted.Flush();file.Flush(true);
-                    digest.TransformFinalBlock(Array.Empty<byte>(),0,0);
-                    hash=BitConverter.ToString(digest.Hash).Replace("-","").ToLowerInvariant();bytes=counted.Written;
+                    token.ThrowIfCancellationRequested();
+                    var finalizeStarted=performance==null?0:Stopwatch.GetTimestamp();
+                    try
+                    {
+                        counted.Flush();file.Flush(true);
+                        digest.TransformFinalBlock(Array.Empty<byte>(),0,0);
+                        hash=BitConverter.ToString(digest.Hash).Replace("-","").ToLowerInvariant();bytes=counted.Written;
+                    }
+                    finally{if(performance!=null)performance.AddArtifactFinalize(Stopwatch.GetTimestamp()-finalizeStarted);}
                 }
                 return new PreparedResult {Path=path,Length=bytes,Sha256=hash,ContentType=contentType,
                     ContentEncoding=gzip?"gzip":"identity",FileName=fileName,ResultKind="artifact",DeleteOnDispose=true};

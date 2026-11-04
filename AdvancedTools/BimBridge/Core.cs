@@ -228,6 +228,7 @@ namespace AdvancedTools.BimBridge
         public bool DeleteTemporaryResults { get; set; } = true;
         public bool DiagnosticOperationsEnabled { get; set; }
         public string LogLevel { get; set; } = "Info";
+        public string TelemetryMode { get; set; } = "Basic";
         public string ResultsDirectory { get; set; } =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PilotBimBridge", "Results");
         public string LoadedProjectNames { get; set; } = DefaultLoadedProjectName;
@@ -284,6 +285,7 @@ namespace AdvancedTools.BimBridge
 
         private void Normalize()
         {
+            if (TelemetryMode != "Off" && TelemetryMode != "Basic" && TelemetryMode != "Detailed") TelemetryMode = "Basic";
             if (!Guid.TryParse(DurableWorkerId, out _)) DurableWorkerId = Guid.NewGuid().ToString("N");
             MaxInFlightChunks = Math.Max(1, Math.Min(4, MaxInFlightChunks));
             MaxUploadChunkBytes=Math.Max(1024,Math.Min(4*1024*1024,MaxUploadChunkBytes));

@@ -50,14 +50,23 @@ namespace AdvancedTools.BimBridge
         private void Frame(object metadata,byte[] blob=null)
         {
             _token.ThrowIfCancellationRequested();
+            var encodingStarted=_performance==null?0:Stopwatch.GetTimestamp();
             var json=Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(metadata));
+            if(_performance!=null)_performance.AddEncoding(Stopwatch.GetTimestamp()-encodingStarted);
             if(json.Length>1048576)throw new BimBridgeException("RESULT_TOO_LARGE","Spatial frame metadata is too large.");
-            _writer.Write((uint)json.Length);_writer.Write((ulong)(blob?.Length??0));_writer.Write(json);
-            if(blob!=null)_writer.Write(blob);
+            var writeStarted=_performance==null?0:Stopwatch.GetTimestamp();
+            try
+            {
+                _writer.Write((uint)json.Length);_writer.Write((ulong)(blob?.Length??0));_writer.Write(json);
+                if(blob!=null)_writer.Write(blob);
+            }
+            finally{if(_performance!=null)_performance.AddArtifactWrite(Stopwatch.GetTimestamp()-writeStarted);}
         }
         private void Buffer(string key,string field,string dtype,long offset,byte[] blob,int count)
         {
+            var started=_performance==null?0:Stopwatch.GetTimestamp();
             string hash;using(var sha=SHA256.Create())hash=BitConverter.ToString(sha.ComputeHash(blob)).Replace("-","").ToLowerInvariant();
+            if(_performance!=null)_performance.AddEncoding(Stopwatch.GetTimestamp()-started);
             Frame(new {Type="buffer",MeshDefinitionKey=key,Field=field,DType=dtype,Offset=offset,Count=count,Sha256=hash},blob);
         }
         public async Task WriteSourceAsync(ElementKey root)
@@ -96,6 +105,7 @@ namespace AdvancedTools.BimBridge
                         var offset=field=="Vertices"?vertices:normals;
                         var enabled=field=="Vertices"||_request.IncludeNormals;
                         byte[] bytes=first&&enabled?new byte[values.Length*4]:null;
+                        var encodingStarted=_performance==null?0:Stopwatch.GetTimestamp();
                         for(var i=0;i<values.Length;i++)
                         {
                             if(!SpatialMath.Finite(values[i]) || float.IsInfinity((float)values[i]))throw new BimBridgeException("INVALID_SPATIAL_DATA","Non-finite mesh value.");
@@ -105,6 +115,7 @@ namespace AdvancedTools.BimBridge
                                 System.Buffer.BlockCopy(scalar,0,bytes,i*4,4);
                             }
                         }
+                        if(_performance!=null)_performance.AddEncoding(Stopwatch.GetTimestamp()-encodingStarted);
                         if(field=="Vertices")
                         {
                             var boundsStarted=Stopwatch.GetTimestamp();
@@ -120,6 +131,7 @@ namespace AdvancedTools.BimBridge
                         var offset=field=="Indices"?indices:edges;
                         var enabled=field=="Indices"?_request.IncludeIndices:_request.IncludeEdgeIndices;
                         byte[] bytes=first&&enabled?new byte[values.Length*4]:null;
+                        var encodingStarted=_performance==null?0:Stopwatch.GetTimestamp();
                         for(var i=0;i<values.Length;i++)
                         {
                             if(values[i]>=vertices/3)throw new BimBridgeException("INVALID_SPATIAL_DATA","Mesh index is outside the vertices.");
@@ -129,6 +141,7 @@ namespace AdvancedTools.BimBridge
                                 System.Buffer.BlockCopy(scalar,0,bytes,i*4,4);
                             }
                         }
+                        if(_performance!=null)_performance.AddEncoding(Stopwatch.GetTimestamp()-encodingStarted);
                         if(field=="Indices")indices+=values.Length;else edges+=values.Length;
                         if(bytes!=null)Buffer(key,field,"<u4",offset,bytes,values.Length);
                         return Task.CompletedTask;

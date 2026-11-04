@@ -22,22 +22,24 @@ namespace AdvancedTools.BimBridge
         private readonly Dictionary<Guid,SnapshotElementIndexCache.PartIndex> _partIndexes=new Dictionary<Guid,SnapshotElementIndexCache.PartIndex>();
         public SpatialSdkSource(ModelAccess model,bool normals=true,bool indices=true,bool edges=true,SnapshotElementIndexCache snapshotIndex=null,bool coalescedNodeRead=false,MeshGeometryCache meshCache=null,SpatialPerformanceMetrics performance=null)
         { _model=model;_normals=normals;_indices=indices;_edges=edges;_snapshotIndex=snapshotIndex;_coalescedNodeRead=coalescedNodeRead;_meshCache=meshCache;_performance=performance;_recordTraversal=performance==null?null:(Action<long>)performance.AddTraversal;_recordAcquire=performance==null?null:(Action<long>)performance.AddMeshAcquire;_recordVertices=performance==null?null:(Action<long>)performance.AddVertices; }
+        private Task<T> ReadSdkAsync<T>(Func<IModelStorage,T> read,CancellationToken token)
+            => _model.Sdk.ReadAsync(read,token,_performance==null?null:(Action<long>)_performance.AddSdkDispatchWait);
         public async Task<bool> ExistsAsync(ElementKey key,CancellationToken token)
         {
             if(_snapshotIndex!=null)
             {
                 if(!_partIndexes.TryGetValue(key.ModelPartId,out var index))
-                {index=await _snapshotIndex.GetAsync(_model,key.ModelPartId,token).ConfigureAwait(false);_partIndexes.Add(key.ModelPartId,index);}
+                {index=await _snapshotIndex.GetAsync(_model,key.ModelPartId,token,_performance).ConfigureAwait(false);_partIndexes.Add(key.ModelPartId,index);}
                 return index.Contains(key.ElementId);
             }
-            return await _model.Sdk.ReadAsync(s=>
+            return await ReadSdkAsync(s=>
                 Timed(()=>s.LoadElement(new ModelElementId(key.ModelPartId,key.ElementId),_model.Version)!=null,_recordTraversal),token).ConfigureAwait(false);
         }
         public bool CoalescedNodeReadEnabled=>_coalescedNodeRead;
         public Task<SpatialNodeSnapshot> ReadNodeAsync(ElementKey key,bool includeChildren,CancellationToken token)
         {
             if(!_coalescedNodeRead)throw new InvalidOperationException("Coalesced node reading is disabled.");
-            return _model.Sdk.ReadAsync(storage=>
+            return ReadSdkAsync(storage=>
             {
                 var started=Stopwatch.GetTimestamp();
                 try
@@ -74,12 +76,12 @@ namespace AdvancedTools.BimBridge
         }
         public async Task VisitChildrenAsync(ElementKey key,Func<ElementKey,bool> visit,CancellationToken token)
         {
-            var cursor=await _model.Sdk.ReadAsync(s => new SpatialSdkCursor<IModelElement>(Timed(()=>s.LoadChildElements(new ModelElementId(key.ModelPartId,key.ElementId),_model.Version),_recordTraversal)),token).ConfigureAwait(false);
+            var cursor=await ReadSdkAsync(s => new SpatialSdkCursor<IModelElement>(Timed(()=>s.LoadChildElements(new ModelElementId(key.ModelPartId,key.ElementId),_model.Version),_recordTraversal)),token).ConfigureAwait(false);
             try
             {
                 while (true)
                 {
-                    var batch=await _model.Sdk.ReadAsync(s => Timed(()=>cursor.Read(64,token).Select(x => new ElementKey {ModelPartId=x.Id.ModelPartId,ElementId=x.Id.ElementId}).ToArray(),_recordTraversal),token).ConfigureAwait(false);
+                    var batch=await ReadSdkAsync(s => Timed(()=>cursor.Read(64,token).Select(x => new ElementKey {ModelPartId=x.Id.ModelPartId,ElementId=x.Id.ElementId}).ToArray(),_recordTraversal),token).ConfigureAwait(false);
                     foreach(var item in batch) if(!visit(item)) return;
                     if(batch.Length<64) break;
                 }
@@ -88,12 +90,12 @@ namespace AdvancedTools.BimBridge
         }
         public async Task VisitInstancesAsync(ElementKey key,Func<SpatialInstance,Task> visit,CancellationToken token)
         {
-            var cursor=await _model.Sdk.ReadAsync(s => new SpatialSdkCursor<IMeshInstance>(Timed(()=>s.LoadElementMeshInstances(new ModelElementId(key.ModelPartId,key.ElementId),_model.Version),_recordTraversal)),token).ConfigureAwait(false);
+            var cursor=await ReadSdkAsync(s => new SpatialSdkCursor<IMeshInstance>(Timed(()=>s.LoadElementMeshInstances(new ModelElementId(key.ModelPartId,key.ElementId),_model.Version),_recordTraversal)),token).ConfigureAwait(false);
             try
             {
                 while(true)
                 {
-                    var batch=await _model.Sdk.ReadAsync(s => Timed(()=>cursor.Read(16,token).Select(x => new SpatialInstance {
+                    var batch=await ReadSdkAsync(s => Timed(()=>cursor.Read(16,token).Select(x => new SpatialInstance {
                         MeshId=x.MeshDefinitionId.MeshId,MeshPartId=x.MeshDefinitionId.ModelPartId,Placement=SpatialMath.Matrix(x.Placement)}).ToArray(),_recordTraversal),token).ConfigureAwait(false);
                     foreach(var item in batch) await visit(item).ConfigureAwait(false);
                     if(batch.Length<16) break;
@@ -106,17 +108,17 @@ namespace AdvancedTools.BimBridge
             if(_meshCache!=null)
             {await VisitCachedMeshAsync(instance,floats,indices,token).ConfigureAwait(false);return;}
             // Mesh identity comes from this snapshot's instance, never from an independent lookup.
-            var mesh=await _model.Sdk.ReadAsync(s => Timed(()=>s.LoadMeshDefinition(new SpatialMeshId(instance.MeshPartId,instance.MeshId)),_recordAcquire),token).ConfigureAwait(false);
+            var mesh=await ReadSdkAsync(s => Timed(()=>s.LoadMeshDefinition(new SpatialMeshId(instance.MeshPartId,instance.MeshId)),_recordAcquire),token).ConfigureAwait(false);
             if(mesh==null) throw new BimBridgeException("GEOMETRY_READ_FAILED","Mesh definition is unavailable.");
             foreach(var field in new[]{"Vertices","Normals"})
             {
                 if(field=="Normals"&&!_normals)continue;
-                var cursor=await _model.Sdk.ReadAsync(s => new SpatialSdkCursor<float>(field=="Vertices"?mesh.Vertices:mesh.Normals),token).ConfigureAwait(false);
+                var cursor=await ReadSdkAsync(s => new SpatialSdkCursor<float>(field=="Vertices"?mesh.Vertices:mesh.Normals),token).ConfigureAwait(false);
                 try
                 {
                     do
                     {
-                        var batch=await _model.Sdk.ReadAsync(s => Timed(()=>cursor.Read(8190,token).Select(x=>(double)x).ToArray(),_recordVertices),token).ConfigureAwait(false);
+                        var batch=await ReadSdkAsync(s => Timed(()=>cursor.Read(8190,token).Select(x=>(double)x).ToArray(),_recordVertices),token).ConfigureAwait(false);
                         await floats(field,batch).ConfigureAwait(false);
                         if(batch.Length<8190) break;
                     } while(true);
@@ -126,12 +128,12 @@ namespace AdvancedTools.BimBridge
             foreach(var field in new[]{"Indices","EdgeIndices"})
             {
                 if(field=="Indices"&&!_indices || field=="EdgeIndices"&&!_edges)continue;
-                var cursor=await _model.Sdk.ReadAsync(s => new SpatialSdkCursor<uint>(field=="Indices"?mesh.Indices:mesh.EdgeIndices),token).ConfigureAwait(false);
+                var cursor=await ReadSdkAsync(s => new SpatialSdkCursor<uint>(field=="Indices"?mesh.Indices:mesh.EdgeIndices),token).ConfigureAwait(false);
                 try
                 {
                     do
                     {
-                        var batch=await _model.Sdk.ReadAsync(s => cursor.Read(8190,token),token).ConfigureAwait(false);
+                        var batch=await ReadSdkAsync(s => cursor.Read(8190,token),token).ConfigureAwait(false);
                         await indices(field,batch).ConfigureAwait(false);
                         if(batch.Length<8190) break;
                     } while(true);
@@ -146,11 +148,12 @@ namespace AdvancedTools.BimBridge
             // snapshot must never be replayed into a pinned older task.
             var key=MeshGeometryCache.Key(_model,instance.MeshPartId,instance.MeshId);
             var found=_meshCache.Find(key,_normals,_indices,_edges);
+            _performance?.MeshLookup(found!=null);
             var geometry=found?.Clone()??new MeshGeometryCache.Geometry();
             IMeshDefinition mesh=null;
             if(!geometry.Has(_normals,_indices,_edges))
             {
-                mesh=await _model.Sdk.ReadAsync(s=>Timed(()=>s.LoadMeshDefinition(new SpatialMeshId(instance.MeshPartId,instance.MeshId)),_recordAcquire),token).ConfigureAwait(false);
+                mesh=await ReadSdkAsync(s=>Timed(()=>s.LoadMeshDefinition(new SpatialMeshId(instance.MeshPartId,instance.MeshId)),_recordAcquire),token).ConfigureAwait(false);
                 if(mesh==null)throw new BimBridgeException("GEOMETRY_READ_FAILED","Mesh definition is unavailable.");
             }
             var cacheable=true;
@@ -161,12 +164,12 @@ namespace AdvancedTools.BimBridge
                 if(saved!=null)
                 {foreach(var batch in saved){token.ThrowIfCancellationRequested();await floats(field,batch).ConfigureAwait(false);}continue;}
                 var captured=new List<double[]>();long capturedBytes=geometry.Bytes;
-                var cursor=await _model.Sdk.ReadAsync(s=>new SpatialSdkCursor<float>(field=="Vertices"?mesh.Vertices:mesh.Normals),token).ConfigureAwait(false);
+                var cursor=await ReadSdkAsync(s=>new SpatialSdkCursor<float>(field=="Vertices"?mesh.Vertices:mesh.Normals),token).ConfigureAwait(false);
                 try
                 {
                     while(true)
                     {
-                        var batch=await _model.Sdk.ReadAsync(s=>Timed(()=>cursor.Read(8190,token).Select(x=>(double)x).ToArray(),_recordVertices),token).ConfigureAwait(false);
+                        var batch=await ReadSdkAsync(s=>Timed(()=>cursor.Read(8190,token).Select(x=>(double)x).ToArray(),_recordVertices),token).ConfigureAwait(false);
                         if(cacheable)
                         {
                             if(capturedBytes<=_meshCache.MaxEntryBytes-8L*batch.Length)
@@ -187,12 +190,12 @@ namespace AdvancedTools.BimBridge
                 if(saved!=null)
                 {foreach(var batch in saved){token.ThrowIfCancellationRequested();await indices(field,batch).ConfigureAwait(false);}continue;}
                 var captured=new List<uint[]>();long capturedBytes=geometry.Bytes;
-                var cursor=await _model.Sdk.ReadAsync(s=>new SpatialSdkCursor<uint>(field=="Indices"?mesh.Indices:mesh.EdgeIndices),token).ConfigureAwait(false);
+                var cursor=await ReadSdkAsync(s=>new SpatialSdkCursor<uint>(field=="Indices"?mesh.Indices:mesh.EdgeIndices),token).ConfigureAwait(false);
                 try
                 {
                     while(true)
                     {
-                        var batch=await _model.Sdk.ReadAsync(s=>cursor.Read(8190,token),token).ConfigureAwait(false);
+                        var batch=await ReadSdkAsync(s=>cursor.Read(8190,token),token).ConfigureAwait(false);
                         if(cacheable)
                         {
                             if(capturedBytes<=_meshCache.MaxEntryBytes-4L*batch.Length)
@@ -222,7 +225,12 @@ namespace AdvancedTools.BimBridge
             }
         }
         private static T Timed<T>(Func<T> read,Action<long> record)
-        {var started=Stopwatch.GetTimestamp();try{return read();}finally{record?.Invoke(Stopwatch.GetTimestamp()-started);}}
+        {
+            if(record==null)return read();
+            var started=Stopwatch.GetTimestamp();
+            try{return read();}
+            finally{record(Stopwatch.GetTimestamp()-started);}
+        }
         private sealed class SpatialMeshId : IMeshDefinitionId
         {
             public SpatialMeshId(Guid part,Guid mesh) { ModelPartId=part;MeshId=mesh; }
